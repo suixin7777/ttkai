@@ -54,14 +54,77 @@ export default function useAction() {
             });
         },
 
-        addLinkmanHistoryMessages(linkmanId: string, messages: Message[]) {
+        addLinkmanHistoryMessages(
+            linkmanId: string,
+            messages: Message[],
+            cursor?: {
+                oldestCreateTime?: number | null;
+                oldestId?: string | null;
+                hasMoreBefore?: boolean;
+            },
+        ) {
             messages.forEach((message) => convertMessage(message));
             dispatch({
                 type: ActionTypes.AddLinkmanHistoryMessages,
                 payload: {
                     linkmanId,
                     messages,
+                    ...(cursor || {}),
                 },
+            });
+        },
+
+        /** 整体替换消息窗口, 用于跳转到上次阅读位置 */
+        setLinkmanMessagesWindow(payload: {
+            linkmanId: string;
+            messages: Message[];
+            oldestCreateTime: number | null;
+            oldestId: string | null;
+            newestCreateTime: number | null;
+            newestId: string | null;
+            hasMoreBefore: boolean;
+            hasGapAfter: boolean;
+            anchorMessageId?: string | null;
+            unread?: number;
+        }) {
+            payload.messages.forEach((message) => convertMessage(message));
+            dispatch({
+                type: ActionTypes.SetLinkmanMessagesWindow,
+                payload,
+            });
+        },
+
+        /** 追加更新的消息, 用于从阅读位置继续往后看 */
+        addLinkmanForwardMessages(payload: {
+            linkmanId: string;
+            messages: Message[];
+            newestCreateTime: number | null;
+            newestId: string | null;
+            hasGapAfter: boolean;
+        }) {
+            payload.messages.forEach((message) => convertMessage(message));
+            dispatch({
+                type: ActionTypes.AddLinkmanForwardMessages,
+                payload,
+            });
+        },
+
+        setLinkmanReadState(payload: {
+            linkmanId: string;
+            lastReadMessageId?: string | null;
+            lastReadCreateTime?: number | null;
+            unread?: number;
+        }) {
+            dispatch({
+                type: ActionTypes.SetLinkmanReadState,
+                payload,
+            });
+        },
+
+        incrementLinkmanUnread(linkmanId: string) {
+            dispatch({
+                type: ActionTypes.IncrementLinkmanUnread,
+                payload: linkmanId,
             });
         },
 

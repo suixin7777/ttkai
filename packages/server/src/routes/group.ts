@@ -7,6 +7,7 @@ import getRandomAvatar from '@fiora/utils/getRandomAvatar';
 import Group, { GroupDocument } from '@fiora/database/mongoose/models/group';
 import Socket from '@fiora/database/mongoose/models/socket';
 import Message from '@fiora/database/mongoose/models/message';
+import { createOrUpdateHistory } from '@fiora/database/mongoose/models/history';
 
 const { isValid } = Types.ObjectId;
 
@@ -96,17 +97,30 @@ export async function joinGroup(ctx: Context<{ groupId: string }>) {
     group.members.push(ctx.socket.user);
     await group.save();
 
-    const messages = await Message.find(
-        { toGroup: groupId },
-        {
-            type: 1,
-            content: 1,
-            from: 1,
-            createTime: 1,
-        },
-        { sort: { createTime: -1 }, limit: 3 },
-    ).populate('from', { username: 1, avatar: 1 });
-    messages.reverse();
+    /**
+     * 这里原本查的是 { toGroup: groupId }, 但 MessageSchema 上根本没有 toGroup 这个字段
+     * (字段名是 to), 所以这段"最多带 3 条"的逻辑从来就只返回空数组.
+     * 它还是个升级隐患: mongoose 6 起 strictQuery 默认为严格模式, 未知字段会被直接剥掉,
+     * 这个查询就会变成 Message.find({}) —— 跨群拉取全库最新消息
+     *
+     * 现在改成: 把新成员的阅读位置直接锚定在入群时该群的最新一条消息上.
+     * 这样新人天然就是"已读完"的状态, 首屏只会加载一小页最新消息,
+     * 既不会一进群就拉一大坨历史, 也不会顶着一个巨大的未读角标
+     */
+    const newestMessage = await Message.findOne(
+        { to: groupId },
+        { createTime: 1 },
+        { sort: { createTime: -1, _id: -1 } },
+    ).lean();
+
+    if (newestMessage) {
+        await createOrUpdateHistory(
+            ctx.socket.user.toString(),
+            groupId,
+            newestMessage._id.toString(),
+            new Date(newestMessage.createTime),
+        );
+    }
 
     ctx.socket.join(group._id.toString());
 
@@ -116,7 +130,14 @@ export async function joinGroup(ctx: Context<{ groupId: string }>) {
         avatar: group.avatar,
         createTime: group.createTime,
         creator: group.creator,
-        messages,
+        // 保留字段是为了不打断老客户端, 客户端本来也会把它丢掉 (AddLinkman 会重置 messages)
+        messages: [],
+        lastMessage: newestMessage
+            ? {
+                _id: newestMessage._id.toString(),
+                createTime: new Date(newestMessage.createTime).getTime(),
+            }
+            : null,
     };
 }
 

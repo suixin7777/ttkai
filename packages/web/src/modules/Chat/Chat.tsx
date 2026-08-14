@@ -9,16 +9,9 @@ import GroupManagePanel from './GroupManagePanel';
 import { State, GroupMember } from '../../state/reducer';
 import { ShowUserOrGroupInfoContext } from '../../context';
 import useIsLogin from '../../hooks/useIsLogin';
-import {
-    getGroupOnlineMembers,
-    getUserOnlineStatus,
-    updateHistory,
-} from '../../service';
+import { getGroupOnlineMembers, getUserOnlineStatus } from '../../service';
 import useAction from '../../hooks/useAction';
 import useAero from '../../hooks/useAero';
-import store from '../../state/store';
-
-let lastMessageIdCache = '';
 
 function Chat() {
     const isLogin = useIsLogin();
@@ -80,34 +73,13 @@ function Chat() {
         return () => clearInterval(timer);
     }, [focus]);
 
-    async function intervalUpdateHistory() {
-        // Must get real-time state
-        const state = store.getState();
-        if (
-            !window.document.hidden &&
-            state.focus &&
-            state.linkmans[state.focus] &&
-            state.user?._id
-        ) {
-            const messageKeys = Object.keys(
-                state.linkmans[state.focus].messages,
-            );
-            if (messageKeys.length > 0) {
-                const lastMessageId =
-                    state.linkmans[state.focus].messages[
-                        messageKeys[messageKeys.length - 1]
-                    ]._id;
-                if (lastMessageId !== lastMessageIdCache) {
-                    lastMessageIdCache = lastMessageId;
-                    await updateHistory(state.focus, lastMessageId);
-                }
-            }
-        }
-    }
-    useEffect(() => {
-        const timer = setInterval(intervalUpdateHistory, 1000 * 30);
-        return () => clearInterval(timer);
-    }, [focus]);
+    /**
+     * 这里原本有一个每 30 秒跑一次的心跳, 会把"当前已加载的最新一条消息"写成已读,
+     * 完全不看用户实际滚动到哪儿 —— 用户正往回翻积压消息的时候, 它照样把这些
+     * 还没读的消息标记成已读, 而这正是"回到上次阅读位置"要用的锚点.
+     * 另外它的去重缓存是模块级的, 所有联系人共用一份且退出登录也不重置.
+     * 阅读位置的上报改由 MessageList 负责 —— 滚动容器在那里, 只有它知道用户真正看到哪了
+     */
 
     if (!hasUserInfo) {
         return <div className={Style.chat} />;

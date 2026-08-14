@@ -8,7 +8,10 @@ import Avatar from '../components/Avatar';
 import Style from './InfoDialog.less';
 import { State } from '../state/reducer';
 import Button from '../components/Button';
-import { joinGroup, getLinkmanHistoryMessages } from '../service';
+import { joinGroup, getLinkmanMessagesBefore } from '../service';
+
+/** 新加入群组时只加载这么多条, 避免新人一进群就拉一大坨历史 */
+const JoinGroupMessagesCount = 15;
 import useAction from '../hooks/useAction';
 
 type GroupBasicInfo = {
@@ -54,9 +57,16 @@ function InviteInfo() {
             groupRes.type = 'group';
             action.addLinkman(groupRes, true);
 
-            const messages = await getLinkmanHistoryMessages(groupId, 0);
-            if (messages) {
-                action.addLinkmanHistoryMessages(groupId, messages);
+            const page = await getLinkmanMessagesBefore({
+                linkmanId: groupId,
+                count: JoinGroupMessagesCount,
+            });
+            if (page) {
+                action.addLinkmanHistoryMessages(groupId, page.messages, {
+                    oldestCreateTime: page.oldestCreateTime,
+                    oldestId: page.oldestId,
+                    hasMoreBefore: page.hasMore,
+                });
             }
         }
         clearInviteId();

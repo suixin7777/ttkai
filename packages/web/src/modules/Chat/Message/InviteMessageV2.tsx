@@ -1,7 +1,10 @@
 import React from 'react';
 
 import Style from './InviteMessage.less';
-import { joinGroup, getLinkmanHistoryMessages } from '../../../service';
+import { joinGroup, getLinkmanMessagesBefore } from '../../../service';
+
+/** 新加入群组时只加载这么多条, 避免新人一进群就拉一大坨历史 */
+const JoinGroupMessagesCount = 15;
 import useAction from '../../../hooks/useAction';
 import Message from '../../../components/Message';
 
@@ -21,9 +24,16 @@ function InviteMessage(props: InviteMessageProps) {
             group.type = 'group';
             action.addLinkman(group, true);
             Message.success('加入群组成功');
-            const messages = await getLinkmanHistoryMessages(invite.group, 0);
-            if (messages) {
-                action.addLinkmanHistoryMessages(invite.group, messages);
+            const page = await getLinkmanMessagesBefore({
+                linkmanId: invite.group,
+                count: JoinGroupMessagesCount,
+            });
+            if (page) {
+                action.addLinkmanHistoryMessages(invite.group, page.messages, {
+                    oldestCreateTime: page.oldestCreateTime,
+                    oldestId: page.oldestId,
+                    hasMoreBefore: page.hasMore,
+                });
             }
         }
     }

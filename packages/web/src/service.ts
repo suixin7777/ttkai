@@ -288,6 +288,138 @@ export async function getDefaultGroupHistoryMessages(existCount: number) {
     return messages;
 }
 
+/** 一页消息 + 游标 */
+export type MessagePage = {
+    messages: any[];
+    hasMore: boolean;
+    oldestCreateTime: number | null;
+    oldestId: string | null;
+    newestCreateTime: number | null;
+    newestId: string | null;
+};
+
+/**
+ * 服务端不认识某个事件时会返回 `Server Error: event [x] not exists`
+ * (见 server 的 registerRoutes 中间件).
+ * index.html 被缓存 7 天, 所以新前端完全可能跑在还没升级的服务端上,
+ * 这种情况下要能安静地退回老接口, 而不是每次上滑都弹一个红色报错
+ */
+function isUnsupportedEvent(err: string | null) {
+    return !!err && err.indexOf('not exists') > -1;
+}
+
+/** 服务端是否支持游标接口, 探测到不支持之后就不再重复尝试 */
+let cursorApiSupported = true;
+
+/** 从一页升序消息里算出游标字段, 用于老接口回退时补齐结构 */
+function buildCursorFromMessages(messages: any[]): MessagePage {
+    if (!messages || messages.length === 0) {
+        return {
+            messages: [],
+            hasMore: false,
+            oldestCreateTime: null,
+            oldestId: null,
+            newestCreateTime: null,
+            newestId: null,
+        };
+    }
+    const oldest = messages[0];
+    const newest = messages[messages.length - 1];
+    return {
+        messages,
+        // 老接口不返回 hasMore, 只能用"这一页是否装满"来近似判断
+        hasMore: messages.length >= 30,
+        oldestCreateTime: new Date(oldest.createTime).getTime(),
+        oldestId: oldest._id,
+        newestCreateTime: new Date(newest.createTime).getTime(),
+        newestId: newest._id,
+    };
+}
+
+/**
+ * 向前 (更旧) 翻一页
+ * 不传游标时返回最新的一页, 新加入群组的首屏加载走的就是这条路径
+ */
+export async function getLinkmanMessagesBefore(params: {
+    linkmanId: string;
+    beforeCreateTime?: number | null;
+    beforeId?: string | null;
+    count?: number;
+    /** 老接口回退时需要的偏移量 */
+    existCount?: number;
+}): Promise<MessagePage | null> {
+    const { linkmanId, beforeCreateTime, beforeId, count, existCount } = params;
+
+    if (cursorApiSupported) {
+        const [err, page] = await fetch<MessagePage>(
+            'getLinkmanMessagesBefore',
+            {
+                linkmanId,
+                beforeCreateTime,
+                beforeId,
+                count,
+            },
+            { toast: false },
+        );
+        if (!err && page) {
+            return page;
+        }
+        if (!isUnsupportedEvent(err)) {
+            return null;
+        }
+        cursorApiSupported = false;
+    }
+
+    const messages = await getLinkmanHistoryMessages(
+        linkmanId,
+        existCount || 0,
+    );
+    if (!messages) {
+        return null;
+    }
+    return buildCursorFromMessages(messages);
+}
+
+/**
+ * 向后 (更新) 翻一页, 用于从上次阅读位置继续往下看
+ */
+export async function getLinkmanMessagesAfter(params: {
+    linkmanId: string;
+    afterCreateTime: number;
+    afterId?: string | null;
+    count?: number;
+}): Promise<MessagePage | null> {
+    const [, page] = await fetch<MessagePage>('getLinkmanMessagesAfter', {
+        linkmanId: params.linkmanId,
+        afterCreateTime: params.afterCreateTime,
+        afterId: params.afterId,
+        count: params.count,
+    });
+    return page;
+}
+
+export type UnreadContext = MessagePage & {
+    anchorMessageId: string | null;
+    anchorCreateTime: number | null;
+    hasMoreAfter: boolean;
+    unread: number;
+};
+
+/**
+ * 获取上次阅读位置附近的消息窗口
+ * 锚点由服务端自己查, 客户端不需要传
+ */
+export async function getLinkmanUnreadContext(
+    linkmanId: string,
+    count?: number,
+): Promise<UnreadContext | null> {
+    const [, context] = await fetch<UnreadContext>('getLinkmanUnreadContext', {
+        linkmanId,
+        count,
+    });
+    return context;
+}
+
 /**
  * 搜索用户和群组
  * @param keywords 关键字
@@ -444,7 +576,12 @@ export async function getUserOnlineStatus(userId: string) {
 }
 
 export async function updateHistory(linkmanId: string, messageId: string) {
-    const [, result] = await fetch('updateHistory', { linkmanId, messageId });
+    // 这是后台静默上报, 任何失败都不该弹提示打扰用户
+    const [, result] = await fetch(
+        'updateHistory',
+        { linkmanId, messageId },
+        { toast: false },
+    );
     return !!result;
 }
 

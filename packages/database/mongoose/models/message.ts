@@ -28,6 +28,13 @@ const MessageSchema = new Schema({
     },
 });
 
+/**
+ * 所有消息查询都是 find({ to }).sort({ createTime: -1 }).limit(n) 的形式,
+ * 单列索引无法同时满足过滤和排序, 会退化成内存排序或全表扫描.
+ * 该复合索引同时也是游标分页 (createTime, _id) 的键序, 缺它游标查询同样会退化.
+ */
+MessageSchema.index({ to: 1, createTime: -1, _id: -1 });
+
 export interface MessageDocument extends Document {
     /** 发送人 */
     from: string;

@@ -12,7 +12,7 @@ import { State, Linkman } from '../state/reducer';
 import useAction from '../hooks/useAction';
 import {
     addFriend,
-    getLinkmanHistoryMessages,
+    getLinkmanMessagesBefore,
     deleteFriend,
     sealUser,
     getUserIps,
@@ -99,9 +99,17 @@ function UserInfo(props: UserInfoProps) {
                 };
                 action.addLinkman((newLinkman as unknown) as Linkman, true);
             }
-            const messages = await getLinkmanHistoryMessages(_id, existCount);
-            if (messages) {
-                action.addLinkmanHistoryMessages(_id, messages);
+            const page = await getLinkmanMessagesBefore({
+                linkmanId: _id,
+                count: 15,
+                existCount,
+            });
+            if (page) {
+                action.addLinkmanHistoryMessages(_id, page.messages, {
+                    oldestCreateTime: page.oldestCreateTime,
+                    oldestId: page.oldestId,
+                    hasMoreBefore: page.hasMore,
+                });
             }
             handleFocusUser();
         }

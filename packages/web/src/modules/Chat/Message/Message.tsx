@@ -1,6 +1,5 @@
-import React, { Component, createRef } from 'react';
+import React, { Component } from 'react';
 import pureRender from 'pure-render-decorator';
-import { connect } from 'react-redux';
 
 
 import Time from '@fiora/utils/time';
@@ -23,7 +22,6 @@ import { ActionTypes, DeleteMessagePayload } from '../../../state/action';
 import { deleteMessage } from '../../../service';
 import IconButton from '../../../components/IconButton';
 import IconButton2 from '../../../components/IconButton2';
-import { State } from '../../../state/reducer';
 import Tooltip from '../../../components/Tooltip';
 import themes from '../../../themes';
 
@@ -55,9 +53,10 @@ interface MessageProps {
     content: string;
     loading: boolean;
     percent: number;
-    shouldScroll: boolean;
     tagColorMode: string;
     isAdmin?: boolean;
+    /** ChatInput 的 ref, 用于点头像/回复时把文本插入输入框 */
+    qwe?: any;
 }
 
 interface MessageState {
@@ -67,14 +66,16 @@ interface MessageState {
 }
 
 /**
- * Message组件用hooks实现有些问题
- * 功能上要求Message组件渲染后触发滚动, 实测中发现在useEffect中触发滚动会比在componentDidMount中晚
- * 具体表现就是会先看到历史消息, 然后一闪而过再滚动到合适的位置
+ * 滚动定位已经统一收归到 MessageList 的 useLayoutEffect 里
+ *
+ * 这里原本每条消息都在 componentDidMount 里自己调一次 scrollIntoView,
+ * 当时避开 hooks 是因为 useEffect 执行得比 componentDidMount 晚, 会先闪一下历史消息.
+ * 但 useLayoutEffect 是在浏览器绘制前同步执行的, 不存在这个问题,
+ * 而"每条消息各滚一次"的代价很实在: 首屏渲染时列表容器的 ref 还是 null,
+ * 判断条件退化成对每条消息都为真, 一次提交里会连续触发上百次同步滚动
  */
 @pureRender
 class Message extends Component<MessageProps, MessageState> {
-    $container = createRef<HTMLDivElement>();
-
     constructor(props: MessageProps) {
         super(props);
         this.state = {
@@ -82,14 +83,6 @@ class Message extends Component<MessageProps, MessageState> {
             showReplyList: false,
             showImgList: false,
         };
-    }
-
-    componentDidMount() {
-        const { shouldScroll } = this.props;
-        if (shouldScroll) {
-            // @ts-ignore
-            this.$container.current.scrollIntoView();
-        }
     }
 
     handleMouseEnter = () => {
@@ -259,7 +252,7 @@ class Message extends Component<MessageProps, MessageState> {
     }
 
     render() {
-        const { isSelf, avatar, tag, tagColorMode, username } = this.props;
+        const { id, isSelf, avatar, tag, tagColorMode, username } = this.props;
         const { showDeleteList, showReplyList, showImgList } = this.state;
 
         let tagColor = `rgb(${themes.default.primaryColor})`;
@@ -272,7 +265,8 @@ class Message extends Component<MessageProps, MessageState> {
         return (
             <div
                 className={`${Style.message} ${isSelf ? Style.self : ''}`}
-                ref={this.$container}
+                // 跳转到指定消息时用它在列表容器内定位, 不用全局 id 以免和页面其它内容撞名
+                data-message-id={id}
             >
                 <ShowUserOrGroupInfoContext.Consumer>
                     {(context) => (
@@ -382,6 +376,13 @@ class Message extends Component<MessageProps, MessageState> {
     }
 }
 
-export default connect((state: State) => ({
-    isAdmin: !!(state.user && state.user.isAdmin),
-}))(Message);
+/**
+ * 这里原来包了一层 connect 只为读一个 isAdmin.
+ * 那意味着列表里挂载了多少条消息, store 上就有多少个订阅者:
+ * 每一次 dispatch (每条新消息, 每个上传进度回调) 都要跑 N 次 mapStateToProps
+ * 和 N 次浅比较, 而这个值在整个会话期间根本不会变.
+ * 现在由 MessageList 统一读一次再作为普通 prop 传下来
+ */
+// 显式标注组件类型: @pureRender 装饰器没有类型声明, 会把类的类型抹成 any,
+// 原先是 connect() 顺带把它重新包成了一个合法的 JSX 组件类型
+export default Message as unknown as React.ComponentClass<MessageProps>;

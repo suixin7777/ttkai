@@ -36,9 +36,22 @@ export default function frequency(
     let callTimes: Record<string, number> = {};
 
     // 每60s清空一次次数统计
-    setInterval(() => {
+    const timer = setInterval(() => {
         callTimes = {};
     }, clearDataInterval);
+
+    /**
+     * 这个中间件是每条连接实例化一次的, 定时器原本从不清理,
+     * 于是每个连过的 socket 都会永久留下一个定时器和它闭包里的 callTimes
+     *
+     * 判断一下 on 是否存在: 这个中间件只需要 socket 的 id 和 data,
+     * 单测里传的就是只带这两个字段的假对象
+     */
+    if (typeof socket.on === 'function') {
+        socket.on('disconnect', () => {
+            clearInterval(timer);
+        });
+    }
 
     return async ([event, , cb]: MiddlewareArgs, next: MiddlewareNext) => {
         if (event !== 'sendMessage') {

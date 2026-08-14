@@ -9,8 +9,6 @@ import useAction from '../../hooks/useAction';
 
 import Style from './Linkman.less';
 import useAero from '../../hooks/useAero';
-import { useStore } from '../../hooks/useStore';
-import { updateHistory } from '../../service';
 
 interface LinkmanProps {
     id: string;
@@ -28,7 +26,6 @@ function Linkman(props: LinkmanProps) {
     const action = useAction();
     const focus = useSelector((state: State) => state.focus);
     const aero = useAero();
-    const { linkmans } = useStore();
 
     function formatTime() {
         const nowTime = new Date();
@@ -41,20 +38,15 @@ function Linkman(props: LinkmanProps) {
         return Time.getMonthDate(time);
     }
 
-    async function handleClick() {
-        // Update next linkman read history
-        const nextFocusLinkman = linkmans[id];
-        if (nextFocusLinkman) {
-            const messageKeys = Object.keys(nextFocusLinkman.messages);
-            if (messageKeys.length > 0) {
-                const lastMessageId =
-                    nextFocusLinkman.messages[
-                        messageKeys[messageKeys.length - 1]
-                    ]._id;
-                updateHistory(nextFocusLinkman._id, lastMessageId);
-            }
-        }
-
+    /**
+     * 这里原本会在 setFocus 之前先把"本地已有的最新一条消息"写成已读.
+     * 那等于在用户还没看到任何一条消息之前, 就把他上次读到哪儿这个信息抹掉了 ——
+     * 之后再点"回到上次阅读位置", 只会落到最底部.
+     * 而且它是有损的: 登录时本地只有 15 条, 未读却可能有几百条,
+     * 点一下就把客户端压根没拉过的那些消息也标记成已读了.
+     * 已读上报交给 MessageList, 由真实的滚动位置决定
+     */
+    function handleClick() {
         action.setFocus(id);
         if (isMobile) {
             action.setStatus('functionBarAndLinkmanListVisible', false);

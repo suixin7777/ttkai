@@ -587,3 +587,257 @@ describe('redux reducer', () => {
         expect(newState.status.aero).toBe(true);
     });
 });
+
+/**
+ * 「回到上次阅读位置」相关的状态流转
+ */
+describe('redux reducer - 阅读位置与消息窗口', () => {
+    function makeState(linkman: any, extra: any = {}): State {
+        return {
+            user: { _id: 'self' },
+            linkmans: { [linkman._id]: linkman },
+            focus: '',
+            ...extra,
+        } as unknown as State;
+    }
+
+    function makeMessage(id: string, from = 'other', createTime = 1000) {
+        return {
+            _id: id,
+            type: 'text',
+            content: 'content',
+            createTime,
+            from: { _id: from },
+        };
+    }
+
+    it('聚焦时应把未读数存成快照再清零', () => {
+        const state = makeState({
+            _id: '1',
+            messages: {},
+            unread: 8,
+        });
+        const newState = reducer(state, {
+            type: ActionTypes.SetFocus,
+            payload: '1',
+        } as Action);
+        expect(newState.linkmans['1'].unread).toBe(0);
+        expect(newState.linkmans['1'].unreadSnapshot).toBe(8);
+    });
+
+    it('重复聚焦不应把已有的未读快照冲掉', () => {
+        const state = makeState({
+            _id: '1',
+            messages: {},
+            unread: 0,
+            unreadSnapshot: 8,
+        });
+        const newState = reducer(state, {
+            type: ActionTypes.SetFocus,
+            payload: '1',
+        } as Action);
+        expect(newState.linkmans['1'].unreadSnapshot).toBe(8);
+    });
+
+    it('跳转应整体替换消息窗口并标记断层', () => {
+        const state = makeState({
+            _id: '1',
+            messages: { old: makeMessage('old') },
+            unread: 0,
+        });
+        const newState = reducer(state, {
+            type: ActionTypes.SetLinkmanMessagesWindow,
+            payload: {
+                linkmanId: '1',
+                messages: [makeMessage('a'), makeMessage('b')],
+                oldestCreateTime: 1,
+                oldestId: 'a',
+                newestCreateTime: 2,
+                newestId: 'b',
+                hasMoreBefore: true,
+                hasGapAfter: true,
+                anchorMessageId: 'a',
+                unread: 30,
+            },
+        } as Action);
+        const linkman = newState.linkmans['1'];
+        expect(Object.keys(linkman.messages)).toEqual(['a', 'b']);
+        expect(linkman.messages.old).toBeUndefined();
+        expect(linkman.hasGapAfter).toBe(true);
+        expect(linkman.anchorMessageId).toBe('a');
+        expect(linkman.unreadSnapshot).toBe(30);
+    });
+
+    it('存在断层时新消息只累加未读, 不能插进窗口', () => {
+        const state = makeState(
+            {
+                _id: '1',
+                messages: { a: makeMessage('a') },
+                unread: 0,
+                hasGapAfter: true,
+            },
+            { focus: '1' },
+        );
+        const newState = reducer(state, {
+            type: ActionTypes.AddLinkmanMessage,
+            payload: { linkmanId: '1', message: makeMessage('new') },
+        } as Action);
+        const linkman = newState.linkmans['1'];
+        expect(Object.keys(linkman.messages)).toEqual(['a']);
+        // 聚焦中但消息看不见, 依然要计入未读
+        expect(linkman.unread).toBe(1);
+    });
+
+    it('自己发的消息不应给自己算未读', () => {
+        const state = makeState({
+            _id: '1',
+            messages: {},
+            unread: 0,
+        });
+        const newState = reducer(state, {
+            type: ActionTypes.AddLinkmanMessage,
+            payload: { linkmanId: '1', message: makeMessage('m1', 'self') },
+        } as Action);
+        expect(newState.linkmans['1'].unread).toBe(0);
+        expect(Object.keys(newState.linkmans['1'].messages)).toHaveLength(1);
+    });
+
+    it('向后翻页应追加到窗口尾部并更新断层标记', () => {
+        const state = makeState({
+            _id: '1',
+            messages: { a: makeMessage('a') },
+            hasGapAfter: true,
+            unread: 5,
+        });
+        const newState = reducer(state, {
+            type: ActionTypes.AddLinkmanForwardMessages,
+            payload: {
+                linkmanId: '1',
+                messages: [makeMessage('b'), makeMessage('c')],
+                newestCreateTime: 3,
+                newestId: 'c',
+                hasGapAfter: false,
+            },
+        } as Action);
+        const linkman = newState.linkmans['1'];
+        expect(Object.keys(linkman.messages)).toEqual(['a', 'b', 'c']);
+        expect(linkman.hasGapAfter).toBe(false);
+        expect(linkman.newestId).toBe('c');
+    });
+
+    it('IncrementLinkmanUnread 只动未读数', () => {
+        const state = makeState({ _id: '1', messages: {}, unread: 2 });
+        const newState = reducer(state, {
+            type: ActionTypes.IncrementLinkmanUnread,
+            payload: '1',
+        } as Action);
+        expect(newState.linkmans['1'].unread).toBe(3);
+    });
+
+    it('同一个用户重连时应保留已加载的消息和游标', () => {
+        const state = {
+            user: { _id: 'self' },
+            linkmans: {
+                g1: {
+                    _id: 'g1',
+                    type: 'group',
+                    messages: { a: makeMessage('a') },
+                    unread: 3,
+                    oldestCreateTime: 100,
+                    oldestId: 'a',
+                },
+            },
+            focus: 'g1',
+        } as unknown as State;
+        const newState = reducer(state, {
+            type: ActionTypes.SetUser,
+            payload: {
+                _id: 'self',
+                username: 'u',
+                avatar: 'a',
+                tag: '',
+                isAdmin: false,
+                groups: [{ _id: 'g1', name: 'g', avatar: 'a' }],
+                friends: [],
+            },
+        } as unknown as Action);
+        expect(Object.keys(newState.linkmans.g1.messages)).toHaveLength(1);
+        expect(newState.linkmans.g1.unread).toBe(3);
+        expect(newState.linkmans.g1.oldestId).toBe('a');
+    });
+
+    it('换成另一个用户时不能把上一个用户的消息带过去', () => {
+        const state = {
+            user: { _id: 'self' },
+            linkmans: {
+                g1: {
+                    _id: 'g1',
+                    type: 'group',
+                    messages: { a: makeMessage('a') },
+                    unread: 3,
+                },
+            },
+            focus: 'g1',
+        } as unknown as State;
+        const newState = reducer(state, {
+            type: ActionTypes.SetUser,
+            payload: {
+                _id: 'other',
+                username: 'u',
+                avatar: 'a',
+                tag: '',
+                isAdmin: false,
+                groups: [{ _id: 'g1', name: 'g', avatar: 'a' }],
+                friends: [],
+            },
+        } as unknown as Action);
+        expect(Object.keys(newState.linkmans.g1.messages)).toHaveLength(0);
+        expect(newState.linkmans.g1.unread).toBe(0);
+    });
+
+    it('重复收到同一条撤回推送不应抛异常', () => {
+        const state = makeState({
+            _id: '1',
+            messages: {
+                m1: {
+                    _id: 'm1',
+                    type: 'system',
+                    content: '撤回了消息',
+                    deleted: true,
+                    from: { _id: 'system' },
+                },
+            },
+        });
+        expect(() =>
+            reducer(state, {
+                type: ActionTypes.DeleteMessage,
+                payload: {
+                    linkmanId: '1',
+                    messageId: 'm1',
+                    shouldDelete: false,
+                },
+            } as Action),
+        ).not.toThrow();
+    });
+
+    it('联系人不存在时各个消息 action 都应安全返回原状态', () => {
+        const state = { linkmans: {}, focus: '' } as unknown as State;
+        const actions = [
+            {
+                type: ActionTypes.AddLinkmanHistoryMessages,
+                payload: { linkmanId: 'nope', messages: [] },
+            },
+            {
+                type: ActionTypes.AddLinkmanMessage,
+                payload: { linkmanId: 'nope', message: makeMessage('m') },
+            },
+            {
+                type: ActionTypes.IncrementLinkmanUnread,
+                payload: 'nope',
+            },
+        ];
+        actions.forEach((action) => {
+            expect(reducer(state, action as Action)).toBe(state);
+        });
+    });
+});

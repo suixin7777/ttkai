@@ -19,7 +19,7 @@ import {
 import {
     guest,
     loginByToken,
-    getLinkmanHistoryMessages,
+    getLinkmanMessagesBefore,
     getLinkmansLastMessagesV2,
 } from './service';
 import store from './state/store';
@@ -164,13 +164,25 @@ socket.on('message', async (message: any) => {
         });
         title = `${message.from.username} 对你说:`;
 
-        const messages = await getLinkmanHistoryMessages(newLinkman._id, 0);
-        if (messages) {
+        const page = await getLinkmanMessagesBefore({
+            linkmanId: newLinkman._id,
+            count: 15,
+        });
+        if (page && page.messages.length > 0) {
+            /**
+             * 这条路径原本是全项目唯一一个不做 convertMessage 就直接 dispatch 的地方,
+             * 结果陌生人私聊的首屏里如果有系统消息, 就会以原始 JSON 的样子渲染出来,
+             * 被撤回的消息也会显示原文而不是"撤回了消息"
+             */
+            page.messages.forEach(convertMessage);
             dispatch({
                 type: ActionTypes.AddLinkmanHistoryMessages,
                 payload: {
                     linkmanId: newLinkman._id,
-                    messages,
+                    messages: page.messages,
+                    oldestCreateTime: page.oldestCreateTime,
+                    oldestId: page.oldestId,
+                    hasMoreBefore: page.hasMore,
                 } as AddLinkmanHistoryMessagesPayload,
             });
         }

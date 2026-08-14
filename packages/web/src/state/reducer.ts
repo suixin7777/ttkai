@@ -9,6 +9,10 @@ import {
     SetStatusPayload,
     AddLinkmanPayload,
     AddLinkmanHistoryMessagesPayload,
+    SetLinkmanMessagesWindowPayload,
+    AddLinkmanForwardMessagesPayload,
+    SetLinkmanReadStatePayload,
+    IncrementLinkmanUnreadPayload,
     SetLinkmansLastMessagesPayload,
     SetLinkmanPropertyPayload,
     UpdateMessagePayload,
@@ -73,6 +77,38 @@ export interface Linkman extends Group, User {
     type: string;
     unread: number;
     messages: MessagesMap;
+
+    /**
+     * 向前翻页的游标.
+     * 以前翻页是拿"客户端持有的消息条数"当偏移量, 那个数字既包含还没落库的乐观消息,
+     * 也会被 SetFocus 的裁剪破坏. 换成游标之后裁剪就只是单纯的内存回收了
+     */
+    oldestCreateTime?: number | null;
+    oldestId?: string | null;
+    /** 是否还有更早的消息 */
+    hasMoreBefore?: boolean;
+
+    /** 当前窗口最新一条消息的游标, 用于从阅读位置继续往后拉 */
+    newestCreateTime?: number | null;
+    newestId?: string | null;
+    /**
+     * 当前窗口和实时最新消息之间是否存在断层.
+     * 跳回上次阅读位置之后就是这个状态, 此时新到的消息只能累加未读数,
+     * 绝对不能直接追加进窗口 —— 那样会渲染成乱序, 并且伪造出"消息是连续的"这个假象
+     */
+    hasGapAfter?: boolean;
+
+    /** 服务端记录的阅读位置 */
+    lastReadMessageId?: string | null;
+    lastReadCreateTime?: number | null;
+    /**
+     * 进入会话前的未读数快照.
+     * SetFocus 会把 unread 清零, 不先存一份的话, "还有 N 条未读"这个信息
+     * 在用户点开会话的瞬间就永远拿不回来了
+     */
+    unreadSnapshot?: number;
+    /** 跳转锚点, 用于滚动定位和画未读分隔线 */
+    anchorMessageId?: string | null;
 }
 
 export interface LinkmansMap {
@@ -196,6 +232,50 @@ function deleteObjectKey<T>(obj: T, key: string): T {
 }
 
 /**
+ * 取值, 为 null/undefined 时回退到默认值
+ * 服务端可能是尚未升级的版本, 新增字段会整个缺失
+ */
+function fallback<T>(value: T | null | undefined, defaultValue: T): T {
+    return value === undefined || value === null ? defaultValue : value;
+}
+
+/**
+ * 单个联系人在内存里最多保留的消息数
+ * 以前唯一的回收点是 SetFocus, 而它只作用于正在切入的那个联系人,
+ * 于是一个你从来不点开的活跃群会把整场会话的消息全部堆在内存里,
+ * 并且每来一条新消息都要整体复制一遍这个 map
+ */
+const MaxLoadedMessages = 200;
+
+/**
+ * 超出上限时从最旧的一端裁掉
+ * @param messages 消息map
+ * @param keepNewest 是否保留最新的一端
+ */
+function trimMessages(messages: MessagesMap, keepNewest = true): MessagesMap {
+    const keys = Object.keys(messages);
+    if (keys.length <= MaxLoadedMessages) {
+        return messages;
+    }
+    const dropKeys = keepNewest
+        ? keys.slice(0, keys.length - MaxLoadedMessages)
+        : keys.slice(MaxLoadedMessages);
+    return deleteObjectKeys(messages, dropKeys);
+}
+
+/**
+ * 取消息map里最旧/最新的一条
+ * 消息在 map 里的顺序完全依赖插入顺序, 这里遵循同一套约定
+ */
+function getEdgeMessage(messages: MessagesMap, edge: 'oldest' | 'newest') {
+    const keys = Object.keys(messages);
+    if (keys.length === 0) {
+        return null;
+    }
+    return messages[edge === 'oldest' ? keys[0] : keys[keys.length - 1]];
+}
+
+/**
  * 初始化联系人部分公共字段
  * @param linkman 联系人
  * @param type 联系人类型
@@ -204,6 +284,16 @@ function initLinkmanFields(linkman: Linkman, type: string) {
     linkman.type = type;
     linkman.unread = 0;
     linkman.messages = {};
+    linkman.oldestCreateTime = null;
+    linkman.oldestId = null;
+    linkman.hasMoreBefore = true;
+    linkman.newestCreateTime = null;
+    linkman.newestId = null;
+    linkman.hasGapAfter = false;
+    linkman.lastReadMessageId = null;
+    linkman.lastReadCreateTime = null;
+    linkman.unreadSnapshot = 0;
+    linkman.anchorMessageId = null;
 }
 
 /**
@@ -329,6 +419,41 @@ function reducer(state: State = initialState, action: Action): State {
                 focus = linkmans[0]._id;
             }
 
+            const linkmansMap = getLinkmansMap(linkmans);
+
+            /**
+             * socket 每次自动重连都会重跑一遍登录流程, 进而重跑 SetUser,
+             * 而 transformGroup / transformFriend 会把 messages 清空.
+             * 网络一抖, 用户翻了半天的历史消息就全没了, 还要再拉一遍全量.
+             * 因此同一个用户重连时, 保留已经加载好的消息和游标
+             *
+             * 这里必须比对 user._id: 退出登录并不会刷新页面, 如果不加判断,
+             * A 账号的消息就会泄漏到 B 账号的会话里 (默认群这种 id 是共享的)
+             */
+            const isSameUser = !!state.user && state.user._id === _id;
+            if (isSameUser) {
+                Object.keys(linkmansMap).forEach((linkmanId) => {
+                    const existing = state.linkmans[linkmanId];
+                    if (existing) {
+                        linkmansMap[linkmanId] = {
+                            ...linkmansMap[linkmanId],
+                            messages: existing.messages,
+                            unread: existing.unread,
+                            unreadSnapshot: existing.unreadSnapshot,
+                            oldestCreateTime: existing.oldestCreateTime,
+                            oldestId: existing.oldestId,
+                            newestCreateTime: existing.newestCreateTime,
+                            newestId: existing.newestId,
+                            hasMoreBefore: existing.hasMoreBefore,
+                            hasGapAfter: existing.hasGapAfter,
+                            lastReadMessageId: existing.lastReadMessageId,
+                            lastReadCreateTime: existing.lastReadCreateTime,
+                            anchorMessageId: existing.anchorMessageId,
+                        };
+                    }
+                });
+            }
+
             return {
                 ...state,
                 user: {
@@ -338,7 +463,7 @@ function reducer(state: State = initialState, action: Action): State {
                     tag,
                     isAdmin,
                 },
-                linkmans: getLinkmansMap(linkmans),
+                linkmans: linkmansMap,
                 focus,
             };
         }
@@ -387,18 +512,31 @@ function reducer(state: State = initialState, action: Action): State {
                 return state;
             }
 
+            const linkman = state.linkmans[focus];
+
             /**
              * 为了优化性能
              * 如果目标联系人的旧消息个数超过50条, 仅保留50条
              */
-            const { messages } = state.linkmans[focus];
+            const { messages } = linkman;
             const messageKeys = Object.keys(messages);
             let reserveMessages = messages;
+            let { oldestCreateTime, oldestId, hasMoreBefore } = linkman;
             if (messageKeys.length > 50) {
                 reserveMessages = deleteObjectKeys(
                     messages,
                     messageKeys.slice(0, messageKeys.length - 50),
                 );
+                /**
+                 * 裁剪之后向前翻页的游标必须跟着挪到幸存的最旧一条上,
+                 * 否则下次往上翻会从一个已经不在窗口里的位置开始, 中间那段就永远看不到了
+                 */
+                const oldest = getEdgeMessage(reserveMessages, 'oldest');
+                if (oldest) {
+                    oldestCreateTime = new Date(oldest.createTime).getTime();
+                    oldestId = oldest._id;
+                    hasMoreBefore = true;
+                }
             }
 
             return {
@@ -406,9 +544,25 @@ function reducer(state: State = initialState, action: Action): State {
                 linkmans: {
                     ...state.linkmans,
                     [focus]: {
-                        ...state.linkmans[focus],
+                        ...linkman,
                         messages: reserveMessages,
                         unread: 0,
+                        /**
+                         * 先把未读数存一份再清零, 这样"回到上次阅读位置"的提示条
+                         * 才有东西可显示. 注意这里刻意不动 hasGapAfter ——
+                         * 裁剪保留的是"当前窗口"最新的 50 条, 对一个跳转过的窗口来说
+                         * 它和实时消息之间的断层依然存在
+                         */
+                        /**
+                         * 注意是 `||` 而不是直接赋值: 再次点开一个已经打开过的会话时
+                         * unread 已经是 0 了, 直接写会把快照抹掉, 提示条就消失了,
+                         * 可用户其实一条都还没读
+                         */
+                        unreadSnapshot:
+                            linkman.unread || linkman.unreadSnapshot || 0,
+                        oldestCreateTime,
+                        oldestId,
+                        hasMoreBefore,
                     },
                 },
                 focus,
@@ -472,17 +626,41 @@ function reducer(state: State = initialState, action: Action): State {
             const { linkmans } = state;
             const newState = { ...state, linkmans: {} };
             Object.keys(linkmans).forEach((linkmanId) => {
+                const payload = linkmansMessages[linkmanId];
+                if (!payload) {
+                    // @ts-ignore
+                    newState.linkmans[linkmanId] = linkmans[linkmanId];
+                    return;
+                }
+                const messages = getMessagesMap(payload.messages);
+                const newest = getEdgeMessage(messages, 'newest');
                 // @ts-ignore
                 newState.linkmans[linkmanId] = {
                     ...linkmans[linkmanId],
-                    ...(linkmansMessages[linkmanId]
-                        ? {
-                            messages: getMessagesMap(
-                                linkmansMessages[linkmanId].messages,
-                            ),
-                            unread: linkmansMessages[linkmanId].unread,
-                        }
-                        : {}),
+                    messages,
+                    unread: payload.unread,
+                    lastReadMessageId: fallback(
+                        payload.lastReadMessageId,
+                        null,
+                    ),
+                    lastReadCreateTime: fallback(
+                        payload.lastReadCreateTime,
+                        null,
+                    ),
+                    oldestCreateTime: fallback(payload.oldestCreateTime, null),
+                    oldestId: fallback(payload.oldestId, null),
+                    newestCreateTime: newest
+                        ? new Date(newest.createTime).getTime()
+                        : null,
+                    newestId: newest ? newest._id : null,
+                    hasMoreBefore: fallback(payload.hasMoreBefore, true),
+                    /**
+                     * 这是直接从服务端拉到的最新一页, 和实时消息是连续的,
+                     * 所以任何遗留的断层标记都应该在这里清掉
+                     */
+                    hasGapAfter: false,
+                    anchorMessageId: null,
+                    unreadSnapshot: payload.unread,
                 };
             });
             return newState;
@@ -490,17 +668,167 @@ function reducer(state: State = initialState, action: Action): State {
 
         case ActionTypes.AddLinkmanHistoryMessages: {
             const payload = action.payload as AddLinkmanHistoryMessagesPayload;
+            const linkman = state.linkmans[payload.linkmanId];
+            /**
+             * 和 SetFocus / DeleteMessage 一样需要判空:
+             * 一个 deleteGroup 推送如果正好赶在历史消息请求返回之前,
+             * 这里就会解引用 undefined 并把异常抛出 reducer
+             */
+            if (!linkman) {
+                /* istanbul ignore next */
+                if (!__TEST__) {
+                    console.warn(
+                        `ActionTypes.AddLinkmanHistoryMessages Error: 联系人 ${payload.linkmanId} 不存在`,
+                    );
+                }
+                return state;
+            }
+
             const messagesMap = getMessagesMap(payload.messages);
+            /**
+             * 这里不做条数上限裁剪: 用户是主动往回翻的, 裁掉他刚要看的内容没有意义.
+             * 内存回收交给 SetFocus 在切走时做
+             */
             return {
                 ...state,
                 linkmans: {
                     ...state.linkmans,
                     [payload.linkmanId]: {
-                        ...state.linkmans[payload.linkmanId],
+                        ...linkman,
                         messages: {
                             ...messagesMap,
-                            ...state.linkmans[payload.linkmanId].messages,
+                            ...linkman.messages,
                         },
+                        oldestCreateTime: fallback(
+                            payload.oldestCreateTime,
+                            linkman.oldestCreateTime as number | null,
+                        ),
+                        oldestId: fallback(
+                            payload.oldestId,
+                            linkman.oldestId as string | null,
+                        ),
+                        hasMoreBefore: fallback(
+                            payload.hasMoreBefore,
+                            linkman.hasMoreBefore as boolean,
+                        ),
+                    },
+                },
+            };
+        }
+
+        case ActionTypes.SetLinkmanMessagesWindow: {
+            const payload =
+                action.payload as SetLinkmanMessagesWindowPayload;
+            const linkman = state.linkmans[payload.linkmanId];
+            if (!linkman) {
+                return state;
+            }
+            /**
+             * 整体替换而不是合并.
+             * 跳回上次阅读位置拿到的是一段和实时消息不相连的窗口, 如果和旧内容合并,
+             * map 里就会同时存在两段不连续的消息, 而顺序完全靠插入顺序维持, 必然错乱
+             */
+            return {
+                ...state,
+                linkmans: {
+                    ...state.linkmans,
+                    [payload.linkmanId]: {
+                        ...linkman,
+                        messages: getMessagesMap(payload.messages),
+                        oldestCreateTime: payload.oldestCreateTime,
+                        oldestId: payload.oldestId,
+                        newestCreateTime: payload.newestCreateTime,
+                        newestId: payload.newestId,
+                        hasMoreBefore: payload.hasMoreBefore,
+                        hasGapAfter: payload.hasGapAfter,
+                        anchorMessageId: fallback(
+                            payload.anchorMessageId,
+                            null,
+                        ),
+                        unreadSnapshot: fallback(
+                            payload.unread,
+                            linkman.unreadSnapshot as number,
+                        ),
+                    },
+                },
+            };
+        }
+
+        case ActionTypes.AddLinkmanForwardMessages: {
+            const payload =
+                action.payload as AddLinkmanForwardMessagesPayload;
+            const linkman = state.linkmans[payload.linkmanId];
+            if (!linkman) {
+                return state;
+            }
+            return {
+                ...state,
+                linkmans: {
+                    ...state.linkmans,
+                    [payload.linkmanId]: {
+                        ...linkman,
+                        // 这批消息严格新于窗口里已有的消息, 追加在尾部
+                        messages: {
+                            ...linkman.messages,
+                            ...getMessagesMap(payload.messages),
+                        },
+                        newestCreateTime: fallback(
+                            payload.newestCreateTime,
+                            linkman.newestCreateTime as number | null,
+                        ),
+                        newestId: fallback(
+                            payload.newestId,
+                            linkman.newestId as string | null,
+                        ),
+                        hasGapAfter: payload.hasGapAfter,
+                    },
+                },
+            };
+        }
+
+        case ActionTypes.SetLinkmanReadState: {
+            const payload = action.payload as SetLinkmanReadStatePayload;
+            const linkman = state.linkmans[payload.linkmanId];
+            if (!linkman) {
+                return state;
+            }
+            return {
+                ...state,
+                linkmans: {
+                    ...state.linkmans,
+                    [payload.linkmanId]: {
+                        ...linkman,
+                        lastReadMessageId: fallback(
+                            payload.lastReadMessageId,
+                            linkman.lastReadMessageId as string | null,
+                        ),
+                        lastReadCreateTime: fallback(
+                            payload.lastReadCreateTime,
+                            linkman.lastReadCreateTime as number | null,
+                        ),
+                        unread: fallback(payload.unread, linkman.unread),
+                        unreadSnapshot: fallback(
+                            payload.unread,
+                            linkman.unreadSnapshot as number,
+                        ),
+                    },
+                },
+            };
+        }
+
+        case ActionTypes.IncrementLinkmanUnread: {
+            const linkmanId = action.payload as IncrementLinkmanUnreadPayload;
+            const linkman = state.linkmans[linkmanId];
+            if (!linkman) {
+                return state;
+            }
+            return {
+                ...state,
+                linkmans: {
+                    ...state.linkmans,
+                    [linkmanId]: {
+                        ...linkman,
+                        unread: linkman.unread + 1,
                     },
                 },
             };
@@ -508,21 +836,69 @@ function reducer(state: State = initialState, action: Action): State {
 
         case ActionTypes.AddLinkmanMessage: {
             const payload = action.payload as AddLinkmanMessagePayload;
-            let { unread } = state.linkmans[payload.linkmanId];
-            if (state.focus !== payload.linkmanId) {
+            const linkman = state.linkmans[payload.linkmanId];
+            if (!linkman) {
+                return state;
+            }
+
+            const isSelfMessage =
+                !!state.user &&
+                payload.message.from &&
+                payload.message.from._id === state.user._id;
+
+            let { unread } = linkman;
+            /**
+             * 只有"正在看这个会话, 并且窗口就接在实时消息后面"时, 新消息才算被看到.
+             * 窗口存在断层时消息根本不会出现在界面上, 即使会话是聚焦的也得计入未读
+             */
+            const isVisible =
+                state.focus === payload.linkmanId && !linkman.hasGapAfter;
+            // 自己发的消息不该给自己算未读, 否则多端登录时会凭空多出角标
+            if (!isVisible && !isSelfMessage) {
                 unread++;
             }
+
+            /**
+             * 窗口和实时消息之间存在断层时, 新消息只累加未读数, 不塞进窗口.
+             * 塞进去会渲染成乱序, 而且会让后续的翻页游标是从一个虚假的边界算出来的.
+             * 用户点"跳到最新消息"时会整体重新拉一页, 那时自然就补齐了
+             */
+            if (linkman.hasGapAfter) {
+                return {
+                    ...state,
+                    linkmans: {
+                        ...state.linkmans,
+                        [payload.linkmanId]: {
+                            ...linkman,
+                            unread,
+                        },
+                    },
+                };
+            }
+
+            const messages = trimMessages({
+                ...linkman.messages,
+                [payload.message._id]: payload.message,
+            });
+            const oldest = getEdgeMessage(messages, 'oldest');
+
             return {
                 ...state,
                 linkmans: {
                     ...state.linkmans,
                     [payload.linkmanId]: {
-                        ...state.linkmans[payload.linkmanId],
-                        messages: {
-                            ...state.linkmans[payload.linkmanId].messages,
-                            [payload.message._id]: payload.message,
-                        },
+                        ...linkman,
+                        messages,
                         unread,
+                        newestCreateTime: new Date(
+                            payload.message.createTime,
+                        ).getTime(),
+                        newestId: payload.message._id,
+                        // 裁剪掉最旧的消息后, 向前翻页的游标要跟着挪
+                        oldestCreateTime: oldest
+                            ? new Date(oldest.createTime).getTime()
+                            : linkman.oldestCreateTime,
+                        oldestId: oldest ? oldest._id : linkman.oldestId,
                     },
                 },
             };
@@ -541,12 +917,22 @@ function reducer(state: State = initialState, action: Action): State {
                 return state;
             }
 
+            const target = state.linkmans[linkmanId].messages[messageId];
+            /**
+             * 同一条撤回推送可能重复到达 (比如断线重连), 而 convertMessage 不是幂等的:
+             * 它的 system 分支会 JSON.parse(content), 但上一次撤回已经把 content
+             * 改写成了"撤回了消息". 再跑一次就会在 reducer 里抛异常, 整个 dispatch 失败
+             */
+            if (!shouldDelete && (!target || target.deleted)) {
+                return state;
+            }
+
             const newMessages = shouldDelete
                 ? deleteObjectKey(state.linkmans[linkmanId].messages, messageId)
                 : {
                     ...state.linkmans[linkmanId].messages,
                     [messageId]: convertMessage({
-                        ...state.linkmans[linkmanId].messages[messageId],
+                        ...target,
                         deleted: true,
                     }),
                 };

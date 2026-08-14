@@ -24,6 +24,14 @@ export enum ActionTypes {
     SetLinkmansLastMessages = 'SetLinkmansLastMessages',
     /** 添加联系人历史消息 */
     AddLinkmanHistoryMessages = 'AddLinkmanHistoryMessages',
+    /** 整体替换联系人的消息窗口, 用于跳转到上次阅读位置 */
+    SetLinkmanMessagesWindow = 'SetLinkmanMessagesWindow',
+    /** 追加更新的消息, 用于从阅读位置继续往后看 */
+    AddLinkmanForwardMessages = 'AddLinkmanForwardMessages',
+    /** 设置联系人的阅读位置信息 */
+    SetLinkmanReadState = 'SetLinkmanReadState',
+    /** 未读数加一, 但不把消息塞进当前窗口 */
+    IncrementLinkmanUnread = 'IncrementLinkmanUnread',
     /** 添加联系人新消息 */
     AddLinkmanMessage = 'AddLinkmanMessage',
     /** 设置联系人指定属性值 */
@@ -72,13 +80,58 @@ export interface SetLinkmansLastMessagesPayload {
     [linkmanId: string]: {
         messages: Message[];
         unread: number;
+        lastReadMessageId?: string | null;
+        lastReadCreateTime?: number | null;
+        hasMoreBefore?: boolean;
+        oldestCreateTime?: number | null;
+        oldestId?: string | null;
     };
 }
 
 export interface AddLinkmanHistoryMessagesPayload {
     linkmanId: string;
     messages: Message[];
+    /** 向前翻页后新的游标, 不传则保持原值 */
+    oldestCreateTime?: number | null;
+    oldestId?: string | null;
+    hasMoreBefore?: boolean;
 }
+
+/**
+ * 跳转到上次阅读位置时使用
+ * 这是整体替换而不是合并: 跳过去之后客户端持有的是一段和最新消息不相连的窗口,
+ * 所以必须把旧内容清掉, 并且用 hasGapAfter 标记"下方还有断层"
+ */
+export interface SetLinkmanMessagesWindowPayload {
+    linkmanId: string;
+    messages: Message[];
+    oldestCreateTime: number | null;
+    oldestId: string | null;
+    newestCreateTime: number | null;
+    newestId: string | null;
+    hasMoreBefore: boolean;
+    hasGapAfter: boolean;
+    /** 跳转锚点, 用于滚动定位和渲染未读分隔线 */
+    anchorMessageId?: string | null;
+    unread?: number;
+}
+
+export interface AddLinkmanForwardMessagesPayload {
+    linkmanId: string;
+    messages: Message[];
+    newestCreateTime: number | null;
+    newestId: string | null;
+    hasGapAfter: boolean;
+}
+
+export interface SetLinkmanReadStatePayload {
+    linkmanId: string;
+    lastReadMessageId?: string | null;
+    lastReadCreateTime?: number | null;
+    unread?: number;
+}
+
+export type IncrementLinkmanUnreadPayload = string;
 
 export interface AddLinkmanMessagePayload {
     linkmanId: string;
@@ -116,6 +169,10 @@ export interface Action {
         | AddLinkmanPayload
         | SetFocusPayload
         | AddLinkmanHistoryMessagesPayload
+        | SetLinkmanMessagesWindowPayload
+        | AddLinkmanForwardMessagesPayload
+        | SetLinkmanReadStatePayload
+        | IncrementLinkmanUnreadPayload
         | AddLinkmanMessagePayload
         | SetLinkmanPropertyPayload
         | RemoveLinkmanPayload
