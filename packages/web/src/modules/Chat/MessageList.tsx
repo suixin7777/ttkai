@@ -564,6 +564,19 @@ function MessageList(props: Props) {
 
     const messageList = Object.values(messages);
 
+    /**
+     * 未读分隔线要画在"最后读过的那条"之后, 而不是它之前 ——
+     * 锚点本身是已经读过的消息, 把线画在它上面会让它看起来也是新消息.
+     * 锚点正好是最后一条时不画线 (下面没有新消息了)
+     */
+    const anchorIndex = anchorMessageId
+        ? messageList.findIndex((message) => message._id === anchorMessageId)
+        : -1;
+    const dividerBeforeId =
+        anchorIndex >= 0 && anchorIndex + 1 < messageList.length
+            ? messageList[anchorIndex + 1]._id
+            : null;
+
     return (
         <div className={styles.container}>
             <div
@@ -576,7 +589,7 @@ function MessageList(props: Props) {
                 )}
                 {messageList.map((message) => (
                     <React.Fragment key={message._id}>
-                        {anchorMessageId === message._id && (
+                        {dividerBeforeId === message._id && (
                             <div className={styles.divider}>
                                 <span>以下是新消息</span>
                             </div>
