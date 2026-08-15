@@ -152,6 +152,36 @@ describe('linkmanRead', () => {
             } as unknown as State;
         }
 
+        /**
+         * 真实的"积压没加载"场景: 只加载了最新 15 条, 上次读到的那条更早,
+         * 根本不在 messages 里 —— 这才是锚点落在窗口外的实际形态
+         */
+        function backlogState(unread = 20): State {
+            const messages = buildMessages(15, 900000);
+            return {
+                focus: 'other',
+                user: { _id: 'u1' },
+                linkmans: {
+                    g1: {
+                        _id: 'g1',
+                        unread,
+                        unreadSnapshot: unread,
+                        messages,
+                        // 锚点是很早的一条, 不在已加载窗口里
+                        lastReadMessageId: OID_A,
+                        lastReadCreateTime: 1000,
+                        oldestCreateTime: 900000,
+                        hasGapAfter: false,
+                    } as unknown as Linkman,
+                    other: {
+                        _id: 'other',
+                        unread: 0,
+                        messages: {},
+                    } as unknown as Linkman,
+                },
+            } as unknown as State;
+        }
+
         it('老判断在这个场景下确实是假的 (说明确实需要新机制)', () => {
             const s = streamedState();
             expect(isLastReadOutsideWindow(s.linkmans.g1)).toBe(false);
@@ -303,6 +333,72 @@ describe('linkmanRead', () => {
             expect(shouldShowJumpToLastRead(withoutAnchor)).toBe(true);
             // 数不出来就退回钉住那一刻的快照
             expect(getSessionAnchorUnread(withoutAnchor)).toBe(20);
+        });
+
+        /**
+         * 审查发现的回归: 进入会话后 unread 和 unreadSnapshot 统计的是不相交的
+         * 两批消息, 之前"unread > 0 就返回 unread"会把积压那批整个吞掉
+         */
+        it('进入会话后又来了新消息, 角标要把积压和新消息一起算', () => {
+            const base = backlogState();
+
+            let state = reducer(base, {
+                type: ActionTypes.SetFocus,
+                payload: 'g1',
+            } as any);
+            expect(getDisplayUnread(state.linkmans.g1)).toBe(20);
+
+            // 切走, 然后来一条新消息
+            state = reducer(state, {
+                type: ActionTypes.SetFocus,
+                payload: 'other',
+            } as any);
+            state = reducer(state, {
+                type: ActionTypes.AddLinkmanMessage,
+                payload: {
+                    linkmanId: 'g1',
+                    message: {
+                        _id: 'ffffffffffffffffffffffff',
+                        createTime: new Date(9999999),
+                        from: { _id: 'someone' },
+                    },
+                },
+            } as any);
+
+            // 21 条都没读, 不能显示成 1
+            expect(state.linkmans.g1.unread).toBe(1);
+            expect(getDisplayUnread(state.linkmans.g1)).toBe(21);
+        });
+
+        it('再次进入时快照要累加, 不能被新消息数覆盖', () => {
+            const base = backlogState();
+
+            let state = reducer(base, {
+                type: ActionTypes.SetFocus,
+                payload: 'g1',
+            } as any);
+            state = reducer(state, {
+                type: ActionTypes.SetFocus,
+                payload: 'other',
+            } as any);
+            state = reducer(state, {
+                type: ActionTypes.AddLinkmanMessage,
+                payload: {
+                    linkmanId: 'g1',
+                    message: {
+                        _id: 'ffffffffffffffffffffffff',
+                        createTime: new Date(9999999),
+                        from: { _id: 'someone' },
+                    },
+                },
+            } as any);
+            // 再点回来
+            state = reducer(state, {
+                type: ActionTypes.SetFocus,
+                payload: 'g1',
+            } as any);
+
+            expect(state.linkmans.g1.unreadSnapshot).toBe(21);
         });
 
         it('侧边栏角标不受会话锚点影响 (不制造幽灵红点)', () => {

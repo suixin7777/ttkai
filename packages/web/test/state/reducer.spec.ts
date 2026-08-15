@@ -726,6 +726,54 @@ describe('redux reducer - 阅读位置与消息窗口', () => {
     });
 
     /**
+     * 审查发现的回归: 200 条上限裁掉最旧的消息之后, 如果不把 hasMoreBefore
+     * 重新打开, 那些消息就再也拉不回来了, 而界面还显示"没有更早的消息了"
+     */
+    it('AddLinkmanMessage 裁剪后要重新打开向前翻页', () => {
+        const messages: any = {};
+        for (let i = 0; i < 200; i += 1) {
+            const id = i.toString(16).padStart(24, '0');
+            messages[id] = { _id: id, createTime: new Date(1000 + i) };
+        }
+        const state = {
+            user: { _id: 'self' },
+            focus: 'g1',
+            linkmans: {
+                g1: {
+                    _id: 'g1',
+                    type: 'group',
+                    messages,
+                    unread: 0,
+                    // 已经翻到最早了
+                    hasMoreBefore: false,
+                    hasGapAfter: false,
+                },
+            },
+        } as unknown as State;
+
+        const newState = reducer(state, {
+            type: ActionTypes.AddLinkmanMessage,
+            payload: {
+                linkmanId: 'g1',
+                message: {
+                    _id: 'ffffffffffffffffffffffff',
+                    createTime: new Date(99999),
+                    from: { _id: 'other' },
+                },
+            },
+        } as Action);
+
+        const g1 = newState.linkmans.g1;
+        // 仍然是 200 条(最旧的被裁掉了)
+        expect(Object.keys(g1.messages).length).toBe(200);
+        expect(Object.keys(g1.messages)).not.toContain(
+            '0'.padStart(24, '0'),
+        );
+        // 关键: 被裁掉的那段必须还能翻回来
+        expect(g1.hasMoreBefore).toBe(true);
+    });
+
+    /**
      * 退群/删好友时焦点会被动挪到另一个会话, 这条路径不 dispatch SetFocus,
      * 所以清未读、存快照这些"进入会话"的动作必须由 RemoveLinkman 自己补上
      */

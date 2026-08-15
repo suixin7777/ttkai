@@ -433,7 +433,13 @@ function enterLinkman(linkman: Linkman, isEntering: boolean) {
          * 用 `||` 而不是直接赋值: 再次点开一个已经打开过的会话时 unread 已经是 0,
          * 直接写会把快照抹掉, 提示条就消失了, 可用户其实一条都还没读
          */
-        unreadSnapshot: linkman.unread || linkman.unreadSnapshot || 0,
+        /**
+         * 已经钉过锚点说明上次进来没读完, 这次的 unread 是那之后新到的,
+         * 和快照不相交, 要累加. 直接覆盖会把上次的积压抹掉
+         */
+        unreadSnapshot: linkman.sessionAnchorId
+            ? (linkman.unreadSnapshot || 0) + linkman.unread
+            : linkman.unread || linkman.unreadSnapshot || 0,
         oldestCreateTime,
         oldestId,
         hasMoreBefore,
@@ -930,6 +936,15 @@ function reducer(state: State = initialState, action: Action): State {
             if (!linkman) {
                 return state;
             }
+            const forwardMerged = {
+                ...linkman.messages,
+                ...getMessagesMap(payload.messages),
+            };
+            const forwardMessages = trimMessages(forwardMerged);
+            const forwardTrimmed =
+                Object.keys(forwardMessages).length <
+                Object.keys(forwardMerged).length;
+            const forwardOldest = getEdgeMessage(forwardMessages, 'oldest');
             return {
                 ...state,
                 linkmans: {
@@ -937,10 +952,7 @@ function reducer(state: State = initialState, action: Action): State {
                     [payload.linkmanId]: {
                         ...linkman,
                         // 这批消息严格新于窗口里已有的消息, 追加在尾部
-                        messages: {
-                            ...linkman.messages,
-                            ...getMessagesMap(payload.messages),
-                        },
+                        messages: forwardMessages,
                         newestCreateTime: fallback(
                             payload.newestCreateTime,
                             linkman.newestCreateTime as number | null,
@@ -949,6 +961,27 @@ function reducer(state: State = initialState, action: Action): State {
                             payload.newestId,
                             linkman.newestId as string | null,
                         ),
+                        /**
+                         * 一路往下补课时这里是唯一的回收点 —— 跳转之后 hasGapAfter
+                         * 为真, AddLinkmanMessage 会提前返回, 不走它那道 200 条上限.
+                         * 不裁的话窗口能无限涨
+                         *
+                         * 裁的是最旧的一端 (保住向后翻页的游标), 所以同样要重新
+                         * 打开向前翻页, 否则被裁掉的那段就再也回不去了
+                         */
+                        ...(forwardTrimmed
+                            ? {
+                                oldestCreateTime: forwardOldest
+                                    ? new Date(
+                                        forwardOldest.createTime,
+                                    ).getTime()
+                                    : linkman.oldestCreateTime,
+                                oldestId: forwardOldest
+                                    ? forwardOldest._id
+                                    : linkman.oldestId,
+                                hasMoreBefore: true,
+                            }
+                            : {}),
                         hasGapAfter: payload.hasGapAfter,
                         /**
                          * 断层合上了, 说明用户已经从锚点一路读到了实时消息,
@@ -1042,10 +1075,13 @@ function reducer(state: State = initialState, action: Action): State {
                 };
             }
 
-            const messages = trimMessages({
+            const merged = {
                 ...linkman.messages,
                 [payload.message._id]: payload.message,
-            });
+            };
+            const messages = trimMessages(merged);
+            const trimmed =
+                Object.keys(messages).length < Object.keys(merged).length;
             const oldest = getEdgeMessage(messages, 'oldest');
 
             return {
@@ -1065,6 +1101,15 @@ function reducer(state: State = initialState, action: Action): State {
                             ? new Date(oldest.createTime).getTime()
                             : linkman.oldestCreateTime,
                         oldestId: oldest ? oldest._id : linkman.oldestId,
+                        /**
+                         * 真裁掉了东西就必须重新打开向前翻页.
+                         *
+                         * 之前只挪游标不动这个标志: 如果此前已经翻到底
+                         * (hasMoreBefore === false), 被裁掉的那些消息就再也拉不回来了,
+                         * 而界面还理直气壮地显示"没有更早的消息了".
+                         * enterLinkman 里的裁剪就是因为同样的原因才置 true 的
+                         */
+                        ...(trimmed ? { hasMoreBefore: true } : {}),
                     },
                 },
             };

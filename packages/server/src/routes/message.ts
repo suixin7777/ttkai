@@ -1174,20 +1174,41 @@ async function getDefaultGroupId() {
  * 返回结构必须保持"裸数组"不变, 否则会直接打断线上老客户端的游客浏览
  */
 export async function getDefaultGroupHistoryMessages(
-    ctx: Context<{ existCount: number }>,
+    ctx: Context<{
+        existCount: number;
+        /**
+         * 游标, 可选. 传了就按游标翻页, 不传维持原来的 skip 行为
+         *
+         * 加这个是因为 skip 被 MaxExistCount 封了顶: 游客一路往上翻,
+         * existCount 超过上限之后服务端每次都返回同一批消息, 客户端合并进 map
+         * 又看不出变化, 于是翻页静默卡死 —— 界面没报错, 就是再也翻不动了
+         */
+        beforeCreateTime?: number;
+        beforeId?: string;
+    }>,
 ) {
-    const { existCount } = ctx.data;
-    const skip = normalizeExistCount(existCount);
-
+    const { existCount, beforeCreateTime, beforeId } = ctx.data;
     const groupId = await getDefaultGroupId();
-    const messages = await Message.find({ to: groupId }, MessageSelectFields, {
+
+    const cursorTime =
+        typeof beforeCreateTime === 'number' &&
+        Number.isFinite(beforeCreateTime)
+            ? new Date(beforeCreateTime)
+            : null;
+    const filter = cursorTime
+        ? buildCursorFilter(groupId, cursorTime, beforeId || null, 'before')
+        : { to: groupId };
+
+    const messages = await Message.find(filter, MessageSelectFields, {
         sort: { createTime: -1, _id: -1 },
-        skip,
+        // 走游标时不需要 skip, 游标本身就定位了
+        skip: cursorTime ? 0 : normalizeExistCount(existCount),
         limit: EachFetchMessagesCount,
     })
         .populate('from', MessageFromFields)
         .lean();
     await handleInviteV2Messages(messages);
+    // 返回结构保持不变(裸数组), 老客户端不受影响
     return messages.reverse();
 }
 

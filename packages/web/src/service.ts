@@ -281,9 +281,19 @@ export async function getLinkmanHistoryMessages(
  * 获取默认群组的历史消息
  * @param existCount 客户端已有消息条数
  */
-export async function getDefaultGroupHistoryMessages(existCount: number) {
+export async function getDefaultGroupHistoryMessages(
+    existCount: number,
+    /** 游标, 传了就不再受服务端 skip 上限的限制 */
+    cursor?: { beforeCreateTime: number | null; beforeId: string | null },
+) {
     const [, messages] = await fetch('getDefaultGroupHistoryMessages', {
         existCount,
+        ...(cursor && cursor.beforeCreateTime !== null
+            ? {
+                beforeCreateTime: cursor.beforeCreateTime,
+                beforeId: cursor.beforeId,
+            }
+            : {}),
     });
     return messages;
 }

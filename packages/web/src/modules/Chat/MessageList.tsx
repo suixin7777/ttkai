@@ -85,10 +85,18 @@ const styles = {
     `,
 };
 
-type ScrollIntent =
+/**
+ * 滚动意图.
+ *
+ * linkmanId 是必须的: 这些意图都是在 await 之后才写入的, 而用户完全可能在
+ * 请求飞行途中切走. 不带归属的话, A 会话的跳转结果会作用到 B 会话上 ——
+ * 表现为"点开另一个群, 它自己莫名其妙滚到了中间"
+ */
+type ScrollIntent = { linkmanId: string } & (
     | { type: 'bottom' }
     | { type: 'restore'; prevHeight: number; prevTop: number }
-    | { type: 'anchor'; messageId: string };
+    | { type: 'anchor'; messageId: string }
+);
 
 type Props = {
     /** ChatInput 的 ref, 用于点头像/回复时把文本插入输入框 */
@@ -260,9 +268,20 @@ function MessageList(props: Props) {
             if (!isLogin) {
                 const historyMessages = await getDefaultGroupHistoryMessages(
                     existCount,
+                    {
+                        beforeCreateTime:
+                            current.oldestCreateTime === undefined
+                                ? null
+                                : current.oldestCreateTime,
+                        beforeId:
+                            current.oldestId === undefined
+                                ? null
+                                : current.oldestId,
+                    },
                 );
                 if (historyMessages && historyMessages.length > 0) {
                     scrollIntent.current = {
+                        linkmanId: focus,
                         type: 'restore',
                         prevHeight,
                         prevTop,
@@ -290,7 +309,12 @@ function MessageList(props: Props) {
                  * 新高度 - 旧高度 + 旧位置 还原,
                  * 否则插入的历史消息会把视口整个顶下去
                  */
-                scrollIntent.current = { type: 'restore', prevHeight, prevTop };
+                scrollIntent.current = {
+                    linkmanId: focus,
+                    type: 'restore',
+                    prevHeight,
+                    prevTop,
+                };
             }
             action.addLinkmanHistoryMessages(focus, page.messages, {
                 oldestCreateTime: page.oldestCreateTime,
@@ -399,6 +423,10 @@ function MessageList(props: Props) {
 
         const intent = scrollIntent.current;
         scrollIntent.current = null;
+        // 请求飞行途中用户切走了, 这个意图属于别的会话, 丢弃
+        if (intent && intent.linkmanId !== focus) {
+            return;
+        }
 
         if (isFocusChange) {
             // 切换会话必须重置位置, 否则会继承上一个会话的 scrollTop
@@ -451,11 +479,22 @@ function MessageList(props: Props) {
                 reportRead();
             }
         }
+        /**
+         * 必须包一层再传给 pagehide.
+         *
+         * 直接把 reportRead 当监听器, 浏览器会把 PageTransitionEvent 作为第一个参数
+         * 传进去, 正好落在 `force` 上 —— 于是 canReportRead() 和 isAtBottom()
+         * 两道保护全被跳过. 后果很严重: 一个积压 300 条未读、本地只加载了 15 条的
+         * 用户, 关掉标签页就会把最新那条上报成已读, 中间 285 条从此再也回不去
+         */
+        function flushOnHide() {
+            reportRead();
+        }
         window.document.addEventListener('visibilitychange', flush);
-        window.addEventListener('pagehide', reportRead);
+        window.addEventListener('pagehide', flushOnHide);
         return () => {
             window.document.removeEventListener('visibilitychange', flush);
-            window.removeEventListener('pagehide', reportRead);
+            window.removeEventListener('pagehide', flushOnHide);
         };
     }, [reportRead]);
 
@@ -516,6 +555,7 @@ function MessageList(props: Props) {
             return;
         }
         scrollIntent.current = {
+            linkmanId: focus,
             type: 'anchor',
             messageId: context.anchorMessageId || '',
         };
@@ -557,7 +597,7 @@ function MessageList(props: Props) {
         if (!page) {
             return;
         }
-        scrollIntent.current = { type: 'bottom' };
+        scrollIntent.current = { linkmanId: focus, type: 'bottom' };
         action.setLinkmanMessagesWindow({
             linkmanId: focus,
             messages: page.messages,
