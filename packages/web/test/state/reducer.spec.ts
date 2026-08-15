@@ -725,13 +725,62 @@ describe('redux reducer - 阅读位置与消息窗口', () => {
         expect(linkman.newestId).toBe('c');
     });
 
-    it('IncrementLinkmanUnread 只动未读数', () => {
-        const state = makeState({ _id: '1', messages: {}, unread: 2 });
+    /**
+     * 退群/删好友时焦点会被动挪到另一个会话, 这条路径不 dispatch SetFocus,
+     * 所以清未读、存快照这些"进入会话"的动作必须由 RemoveLinkman 自己补上
+     */
+    it('RemoveLinkman 会把新落焦的会话当作"进入"处理', () => {
+        const state = {
+            user: { _id: 'self' },
+            focus: 'gone',
+            linkmans: {
+                survivor: {
+                    _id: 'survivor',
+                    type: 'group',
+                    messages: {},
+                    unread: 7,
+                    unreadSnapshot: 0,
+                },
+                gone: { _id: 'gone', type: 'group', messages: {}, unread: 0 },
+            },
+        } as unknown as State;
+
         const newState = reducer(state, {
-            type: ActionTypes.IncrementLinkmanUnread,
-            payload: '1',
+            type: ActionTypes.RemoveLinkman,
+            payload: 'gone',
         } as Action);
-        expect(newState.linkmans['1'].unread).toBe(3);
+
+        expect(newState.focus).toBe('survivor');
+        // 红点必须擦掉, 否则用户被踢出群后眼前顶着一个抹不掉的未读数
+        expect(newState.linkmans.survivor.unread).toBe(0);
+        // 但未读数要留一份快照, 这样还能回到上次阅读位置
+        expect(newState.linkmans.survivor.unreadSnapshot).toBe(7);
+    });
+
+    it('RemoveLinkman 删掉的不是当前会话时, 焦点会话不受影响', () => {
+        const state = {
+            user: { _id: 'self' },
+            focus: 'keep',
+            linkmans: {
+                keep: {
+                    _id: 'keep',
+                    type: 'group',
+                    messages: {},
+                    unread: 5,
+                    unreadSnapshot: 0,
+                },
+                gone: { _id: 'gone', type: 'group', messages: {}, unread: 0 },
+            },
+        } as unknown as State;
+
+        const newState = reducer(state, {
+            type: ActionTypes.RemoveLinkman,
+            payload: 'gone',
+        } as Action);
+
+        expect(newState.focus).toBe('keep');
+        // 焦点没变, 不该被当成一次"进入", 未读保持原样
+        expect(newState.linkmans.keep.unread).toBe(5);
     });
 
     it('同一个用户重连时应保留已加载的消息和游标', () => {
@@ -830,10 +879,6 @@ describe('redux reducer - 阅读位置与消息窗口', () => {
             {
                 type: ActionTypes.AddLinkmanMessage,
                 payload: { linkmanId: 'nope', message: makeMessage('m') },
-            },
-            {
-                type: ActionTypes.IncrementLinkmanUnread,
-                payload: 'nope',
             },
         ];
         actions.forEach((action) => {

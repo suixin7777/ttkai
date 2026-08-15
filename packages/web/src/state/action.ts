@@ -30,8 +30,6 @@ export enum ActionTypes {
     AddLinkmanForwardMessages = 'AddLinkmanForwardMessages',
     /** 设置联系人的阅读位置信息 */
     SetLinkmanReadState = 'SetLinkmanReadState',
-    /** 未读数加一, 但不把消息塞进当前窗口 */
-    IncrementLinkmanUnread = 'IncrementLinkmanUnread',
     /** 添加联系人新消息 */
     AddLinkmanMessage = 'AddLinkmanMessage',
     /** 设置联系人指定属性值 */
@@ -137,8 +135,6 @@ export interface SetLinkmanReadStatePayload {
     clearSessionAnchor?: boolean;
 }
 
-export type IncrementLinkmanUnreadPayload = string;
-
 export interface AddLinkmanMessagePayload {
     linkmanId: string;
     message: Message;
@@ -178,7 +174,6 @@ export interface Action {
         | SetLinkmanMessagesWindowPayload
         | AddLinkmanForwardMessagesPayload
         | SetLinkmanReadStatePayload
-        | IncrementLinkmanUnreadPayload
         | AddLinkmanMessagePayload
         | SetLinkmanPropertyPayload
         | RemoveLinkmanPayload

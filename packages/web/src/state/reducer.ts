@@ -12,7 +12,6 @@ import {
     SetLinkmanMessagesWindowPayload,
     AddLinkmanForwardMessagesPayload,
     SetLinkmanReadStatePayload,
-    IncrementLinkmanUnreadPayload,
     SetLinkmansLastMessagesPayload,
     SetLinkmanPropertyPayload,
     UpdateMessagePayload,
@@ -362,6 +361,87 @@ function pickSessionAnchor(linkman: Linkman): SessionAnchor {
 }
 
 /**
+ * "进入某个会话"要做的全部状态变更.
+ *
+ * SetFocus 和 RemoveLinkman 共用这一份 —— 退群/删好友时焦点会被动挪到另一个
+ * 会话, 那条路径并不会 dispatch SetFocus, 各写一套的话它就会漏掉清未读、
+ * 存快照、钉锚点这些动作, 表现为"被踢出群之后, 新落焦的会话红点擦不掉"
+ *
+ * @param isEntering 是否真的换了会话. 为 false 时保留已钉住的锚点不动 ——
+ *   Linkman 的点击是无条件 dispatch 的, 连点当前会话也会走进来, 这时
+ *   unread 已经是 0, 重算会把锚点清掉
+ */
+function enterLinkman(linkman: Linkman, isEntering: boolean) {
+    const sessionAnchor = isEntering
+        ? pickSessionAnchor(linkman)
+        : {
+            sessionAnchorId: linkman.sessionAnchorId ?? null,
+            sessionAnchorCreateTime: linkman.sessionAnchorCreateTime ?? null,
+            sessionAnchorUnread: linkman.sessionAnchorUnread ?? 0,
+        };
+
+    /**
+     * 为了优化性能
+     * 如果目标联系人的旧消息个数超过50条, 仅保留50条
+     */
+    // RemoveLinkman 会对"被动落焦"的那个联系人调用本函数, 而它可能是任何形态,
+    // 不像 SetFocus 那样必然经过 initLinkmanFields, 所以这里要容忍 messages 缺失
+    const messages = linkman.messages || {};
+    const messageKeys = Object.keys(messages);
+    let reserveMessages = messages;
+    let { oldestCreateTime, oldestId, hasMoreBefore } = linkman;
+    if (messageKeys.length > 50) {
+        /**
+         * 裁剪不能把锚点本身裁掉.
+         * "进群时已经堆了 50+ 条流进来的消息"恰恰是这个功能存在的理由,
+         * 在这条路径上丢掉锚点等于丢掉分隔线. 锚点之后的消息数量
+         * 由 AddLinkmanMessage 的 200 条上限兜底, 不会无限增长
+         */
+        let dropCount = messageKeys.length - 50;
+        if (sessionAnchor.sessionAnchorId) {
+            const anchorIndex = messageKeys.indexOf(
+                sessionAnchor.sessionAnchorId,
+            );
+            if (anchorIndex >= 0) {
+                dropCount = Math.min(dropCount, anchorIndex);
+            }
+        }
+        reserveMessages =
+            dropCount > 0
+                ? deleteObjectKeys(messages, messageKeys.slice(0, dropCount))
+                : messages;
+        /**
+         * 裁剪之后向前翻页的游标必须跟着挪到幸存的最旧一条上,
+         * 否则下次往上翻会从一个已经不在窗口里的位置开始, 中间那段就永远看不到了
+         */
+        const oldest = getEdgeMessage(reserveMessages, 'oldest');
+        if (oldest) {
+            oldestCreateTime = new Date(oldest.createTime).getTime();
+            oldestId = oldest._id;
+            hasMoreBefore = true;
+        }
+    }
+
+    return {
+        messages: reserveMessages,
+        unread: 0,
+        /**
+         * 先把未读数存一份再清零, 这样"回到上次阅读位置"的提示条才有东西可显示.
+         * 注意这里刻意不动 hasGapAfter —— 裁剪保留的是"当前窗口"最新的 50 条,
+         * 对一个跳转过的窗口来说, 它和实时消息之间的断层依然存在
+         *
+         * 用 `||` 而不是直接赋值: 再次点开一个已经打开过的会话时 unread 已经是 0,
+         * 直接写会把快照抹掉, 提示条就消失了, 可用户其实一条都还没读
+         */
+        unreadSnapshot: linkman.unread || linkman.unreadSnapshot || 0,
+        oldestCreateTime,
+        oldestId,
+        hasMoreBefore,
+        ...sessionAnchor,
+    };
+}
+
+/**
  * 转换群组数据结构
  * @param group 群组
  */
@@ -584,64 +664,7 @@ function reducer(state: State = initialState, action: Action): State {
             }
 
             const linkman = state.linkmans[focus];
-
-            /**
-             * 只有"真正切进来"才重新钉锚点.
-             * Linkman 的点击是无条件 dispatch 的, 连点当前已经打开的会话也会走这里,
-             * 少了这个判断, 随手一点就会拿 unread === 0 去重算, 把锚点清掉
-             */
-            const isEnteringLinkman = state.focus !== focus;
-            const sessionAnchor = isEnteringLinkman
-                ? pickSessionAnchor(linkman)
-                : {
-                    sessionAnchorId: linkman.sessionAnchorId ?? null,
-                    sessionAnchorCreateTime:
-                          linkman.sessionAnchorCreateTime ?? null,
-                    sessionAnchorUnread: linkman.sessionAnchorUnread ?? 0,
-                };
-
-            /**
-             * 为了优化性能
-             * 如果目标联系人的旧消息个数超过50条, 仅保留50条
-             */
-            const { messages } = linkman;
-            const messageKeys = Object.keys(messages);
-            let reserveMessages = messages;
-            let { oldestCreateTime, oldestId, hasMoreBefore } = linkman;
-            if (messageKeys.length > 50) {
-                /**
-                 * 裁剪不能把锚点本身裁掉.
-                 * "进群时已经堆了 50+ 条流进来的消息"恰恰是这个功能存在的理由,
-                 * 在这条路径上丢掉锚点等于丢掉分隔线. 锚点之后的消息数量
-                 * 由 AddLinkmanMessage 的 200 条上限兜底, 不会无限增长
-                 */
-                let dropCount = messageKeys.length - 50;
-                if (sessionAnchor.sessionAnchorId) {
-                    const anchorIndex = messageKeys.indexOf(
-                        sessionAnchor.sessionAnchorId,
-                    );
-                    if (anchorIndex >= 0) {
-                        dropCount = Math.min(dropCount, anchorIndex);
-                    }
-                }
-                reserveMessages =
-                    dropCount > 0
-                        ? deleteObjectKeys(
-                            messages,
-                            messageKeys.slice(0, dropCount),
-                        )
-                        : messages;
-                /**
-                 * 裁剪之后向前翻页的游标必须跟着挪到幸存的最旧一条上,
-                 * 否则下次往上翻会从一个已经不在窗口里的位置开始, 中间那段就永远看不到了
-                 */
-                const oldest = getEdgeMessage(reserveMessages, 'oldest');
-                if (oldest) {
-                    oldestCreateTime = new Date(oldest.createTime).getTime();
-                    oldestId = oldest._id;
-                    hasMoreBefore = true;
-                }
-            }
+            const entered = enterLinkman(linkman, state.focus !== focus);
 
             return {
                 ...state,
@@ -649,25 +672,7 @@ function reducer(state: State = initialState, action: Action): State {
                     ...state.linkmans,
                     [focus]: {
                         ...linkman,
-                        messages: reserveMessages,
-                        unread: 0,
-                        /**
-                         * 先把未读数存一份再清零, 这样"回到上次阅读位置"的提示条
-                         * 才有东西可显示. 注意这里刻意不动 hasGapAfter ——
-                         * 裁剪保留的是"当前窗口"最新的 50 条, 对一个跳转过的窗口来说
-                         * 它和实时消息之间的断层依然存在
-                         */
-                        /**
-                         * 注意是 `||` 而不是直接赋值: 再次点开一个已经打开过的会话时
-                         * unread 已经是 0 了, 直接写会把快照抹掉, 提示条就消失了,
-                         * 可用户其实一条都还没读
-                         */
-                        unreadSnapshot:
-                            linkman.unread || linkman.unreadSnapshot || 0,
-                        oldestCreateTime,
-                        oldestId,
-                        hasMoreBefore,
-                        ...sessionAnchor,
+                        ...entered,
                     },
                 },
                 focus,
@@ -717,13 +722,14 @@ function reducer(state: State = initialState, action: Action): State {
             const linkmanIds = Object.keys(linkmans);
             const focus = linkmanIds.length > 0 ? linkmanIds[0] : '';
             /**
-             * 这条路径把焦点挪到了另一个会话, 却不会 dispatch SetFocus,
-             * 所以得在这里补一次钉锚点, 否则用户被动切过去之后就没得跳了
+             * 这条路径把焦点挪到了另一个会话, 却不会 dispatch SetFocus.
+             * 不在这里补一次"进入会话"的处理, 新落焦的会话就会保留原来的未读数 ——
+             * 用户被踢出群之后, 眼前这个会话顶着一个擦不掉的红点, 也没得跳
              */
             if (focus && linkmans[focus] && focus !== state.focus) {
                 linkmans[focus] = {
                     ...linkmans[focus],
-                    ...pickSessionAnchor(linkmans[focus]),
+                    ...enterLinkman(linkmans[focus], true),
                 };
             }
             return {
@@ -989,24 +995,6 @@ function reducer(state: State = initialState, action: Action): State {
                         ...(payload.clearSessionAnchor
                             ? EmptySessionAnchor
                             : {}),
-                    },
-                },
-            };
-        }
-
-        case ActionTypes.IncrementLinkmanUnread: {
-            const linkmanId = action.payload as IncrementLinkmanUnreadPayload;
-            const linkman = state.linkmans[linkmanId];
-            if (!linkman) {
-                return state;
-            }
-            return {
-                ...state,
-                linkmans: {
-                    ...state.linkmans,
-                    [linkmanId]: {
-                        ...linkman,
-                        unread: linkman.unread + 1,
                     },
                 },
             };

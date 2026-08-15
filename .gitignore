@@ -21,4 +21,5 @@ packages/server/public/avatar/*_*.*
 !packages/server/public/manifest.json
 !packages/server/public/index.html
 !packages/server/public/PrivacyPolicy.html
-.claude/
+# 只忽略本地工具配置, 项目技能要跟着仓库走
+.claude/settings.local.json

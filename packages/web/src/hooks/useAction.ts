@@ -122,13 +122,6 @@ export default function useAction() {
             });
         },
 
-        incrementLinkmanUnread(linkmanId: string) {
-            dispatch({
-                type: ActionTypes.IncrementLinkmanUnread,
-                payload: linkmanId,
-            });
-        },
-
         addLinkmanMessage(linkmanId: string, message: Message) {
             convertMessage(message);
             dispatch({

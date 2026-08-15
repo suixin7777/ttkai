@@ -67,6 +67,21 @@ function createMemoryClient() {
 
 export default function initRedis() {
     if (process.env.RedisMock === 'true') {
+        /**
+         * 生产环境直接拒绝启动.
+         *
+         * 内存实现的数据只在单个进程里, 多进程之间不共享, 重启即丢 ——
+         * 封禁标记、萌新限流、全员禁言这些都会失效, 而且是静默失效.
+         * 这个开关本来就是本次为本地开发新加的, 没有任何线上部署在用,
+         * 所以这里可以放心地硬失败, 不会影响存量部署
+         */
+        if (process.env.NODE_ENV === 'production') {
+            logger.error(
+                '[redis]',
+                'RedisMock=true 不能用于生产环境, 请接入真正的 Redis',
+            );
+            return process.exit(1) as never;
+        }
         logger.warn('[redis]', 'using in-memory redis, do NOT use in production');
         /**
          * 断言成 RedisClient 而不是 any: 返回 any 会让 initRedis 的返回类型整体塌成 any,
