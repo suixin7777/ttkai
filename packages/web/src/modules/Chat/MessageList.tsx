@@ -3,6 +3,7 @@ import { useSelector } from 'react-redux';
 
 import { css } from 'linaria';
 import { State, Message, MessagesMap } from '../../state/reducer';
+import { hasPendingJumpToLastRead } from '../../state/linkmanRead';
 import useIsLogin from '../../hooks/useIsLogin';
 import useAction from '../../hooks/useAction';
 import {
@@ -555,12 +556,7 @@ function MessageList(props: Props) {
      * 上次阅读位置还在当前窗口之外时才提示跳转.
      * 都已经看得到了就没必要再让用户点一下
      */
-    const showJumpToLastRead =
-        isLogin &&
-        !hasGapAfter &&
-        unreadSnapshot > 0 &&
-        !!linkman.lastReadMessageId &&
-        !canReportRead();
+    const showJumpToLastRead = isLogin && hasPendingJumpToLastRead(linkman);
 
     const messageList = Object.values(messages);
 

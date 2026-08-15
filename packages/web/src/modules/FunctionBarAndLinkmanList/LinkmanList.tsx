@@ -2,6 +2,10 @@ import React from 'react';
 import { useSelector } from 'react-redux';
 
 import { Linkman, State } from '../../state/reducer';
+import {
+    getDisplayUnread,
+    hasPendingJumpToLastRead,
+} from '../../state/linkmanRead';
 import LinkmanComponent from './Linkman';
 
 import Style from './LinkmanList.less';
@@ -32,7 +36,14 @@ function LinkmanList() {
                 avatar={linkman.avatar}
                 preview={preview}
                 time={time}
-                unread={linkman.unread}
+                /**
+                 * 不能直接用 linkman.unread —— 点进会话时它就被清零了,
+                 * 但用户可能只是瞄了一眼没真读, 那些消息还欠着
+                 */
+                unread={getDisplayUnread(linkman)}
+                unreadIsPending={
+                    linkman.unread === 0 && hasPendingJumpToLastRead(linkman)
+                }
             />
         );
     }

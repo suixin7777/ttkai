@@ -17,11 +17,24 @@ interface LinkmanProps {
     /** 消息预览 */
     preview: string;
     unread: number;
+    /**
+     * 这些未读是"上次离开之前就欠着的", 而不是刚推过来的.
+     * 用空心角标区分, 免得用户以为自己已经读完了
+     */
+    unreadIsPending?: boolean;
     time: Date;
 }
 
 function Linkman(props: LinkmanProps) {
-    const { id, name, avatar, preview, unread, time } = props;
+    const {
+        id,
+        name,
+        avatar,
+        preview,
+        unread,
+        unreadIsPending = false,
+        time,
+    } = props;
 
     const action = useAction();
     const focus = useSelector((state: State) => state.focus);
@@ -75,7 +88,16 @@ function Linkman(props: LinkmanProps) {
                         dangerouslySetInnerHTML={{ __html: preview }}
                     />
                     {unread > 0 && (
-                        <div className={Style.unread}>
+                        <div
+                            className={`${Style.unread} ${
+                                unreadIsPending ? Style.unreadPending : ''
+                            }`}
+                            title={
+                                unreadIsPending
+                                    ? '还有上次离开前没看完的消息, 点进去可以回到上次阅读位置'
+                                    : undefined
+                            }
+                        >
                             <span>{unread > 99 ? '99+' : unread}</span>
                         </div>
                     )}

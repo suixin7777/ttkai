@@ -76,21 +76,44 @@ Object.keys(routes).forEach((key) => {
     }
 });
 
-io.on('connection', async (socket) => {
+io.on('connection', (socket) => {
     const ip = getSocketIp(socket);
     logger.trace(`connection ${socket.id} ${ip}`);
-    await SocketModel.create({
+
+    /**
+     * 这里必须同步把监听器和中间件都挂上, 不能 await 之后再挂.
+     *
+     * 之前的写法是先 `await SocketModel.create(...)` 再 socket.use(...),
+     * 在这个空档里到达的数据包没有任何监听者, 会被 socket.io 直接丢弃 ——
+     * 客户端的 ack 回调永远不触发, 表现为"连上之后第一个请求石沉大海".
+     * 线上没暴露是因为前端连上后先 await initOSS(), 刚好把第一个请求延后了
+     *
+     * 但那个 await 本身是有意义的: login 路由会 Socket.updateOne({id}) 写入
+     * 用户和环境信息, 记录还没建好的话这次更新会静默失效, 用户就不显示在线.
+     * 所以改成同步注册, 再用一个闸门中间件去等这条记录建好
+     */
+    const socketReady = SocketModel.create({
         id: socket.id,
         ip,
-    } as SocketDocument);
+    } as SocketDocument).catch((err) => {
+        // 建不出来不该让整条连接卡死, 记录下来放行即可
+        logger.error('[connection]', (err as Error).message);
+        return null;
+    });
 
     socket.on('disconnect', async () => {
         logger.trace(`disconnect ${socket.id}`);
+        // 等建好再删, 否则闪连闪断会留下一条永远删不掉的记录
+        await socketReady;
         await SocketModel.deleteOne({
             id: socket.id,
         });
     });
 
+    socket.use(async (_packet, next) => {
+        await socketReady;
+        next();
+    });
     socket.use(seal(socket));
     socket.use(isLogin(socket));
     socket.use(isAdmin(socket));
