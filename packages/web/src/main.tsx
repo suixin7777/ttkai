@@ -8,6 +8,7 @@ import { Provider } from 'react-redux';
 
 import config from '@fiora/config/client';
 import setCssVariable from './utils/setCssVariable';
+import startUpdateChecker from './utils/checkUpdate';
 import App from './App';
 import store from './state/store';
 import getData from './localStorage';
@@ -17,6 +18,14 @@ if (window.location.protocol === 'https:' && 'serviceWorker' in navigator) {
     window.addEventListener('load', () => {
         navigator.serviceWorker.register(`/service-worker.js`);
     });
+}
+
+/**
+ * 发版后让还开着页面的用户自动拿到新代码.
+ * 只在生产构建下启用 —— 开发模式的入口文件不带哈希, 查了也没意义
+ */
+if (process.env.NODE_ENV !== 'development') {
+    startUpdateChecker();
 }
 
 // 如果配置了前端监控, 动态加载并启动监控

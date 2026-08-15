@@ -122,6 +122,15 @@ export interface Linkman extends Group, User {
     sessionAnchorCreateTime?: number | null;
     /** 钉住那一刻的未读数, 消息还在窗口里时会用实时计算的值覆盖它 */
     sessionAnchorUnread?: number;
+
+    /**
+     * 用户在"窗口有断层"的状态下发消息的次数, 单调递增.
+     *
+     * 断层状态下新消息不会进窗口 (会渲染成乱序), 自己发的也一样 ——
+     * 于是用户发完消息什么都看不见. 这个序号是给界面的信号:
+     * 变了就说明"用户想说话", 该带他回到最新消息那里
+     */
+    selfMessageSeq?: number;
 }
 
 export interface LinkmansMap {
@@ -312,6 +321,7 @@ function initLinkmanFields(linkman: Linkman, type: string) {
     linkman.sessionAnchorId = null;
     linkman.sessionAnchorCreateTime = null;
     linkman.sessionAnchorUnread = 0;
+    linkman.selfMessageSeq = 0;
 }
 
 /** 落库消息的 id 形态, 上传中的乐观消息用的是 `${linkmanId}${Date.now()}` */
@@ -1070,6 +1080,10 @@ function reducer(state: State = initialState, action: Action): State {
                         [payload.linkmanId]: {
                             ...linkman,
                             unread,
+                            // 自己说话了就记一笔, 界面据此把用户带回最新
+                            selfMessageSeq: isSelfMessage
+                                ? (linkman.selfMessageSeq || 0) + 1
+                                : linkman.selfMessageSeq,
                         },
                     },
                 };

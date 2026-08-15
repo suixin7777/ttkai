@@ -131,6 +131,8 @@ function MessageList(props: Props) {
     const sessionAnchorId = (linkman && linkman.sessionAnchorId) || null;
     const sessionAnchorCreateTime =
         (linkman && linkman.sessionAnchorCreateTime) || null;
+    /** 断层状态下用户发消息的次数, 变化即代表"用户想说话" */
+    const selfMessageSeq = (linkman && linkman.selfMessageSeq) || 0;
     /**
      * 画分隔线用的锚点: 会话锚点优先.
      * 这样一进会话就能看到"读到哪了", 不用非得先跳一次
@@ -167,6 +169,8 @@ function MessageList(props: Props) {
     /** 用户当前是否贴着底部, 在滚动时持续记录, 供提交后判断要不要跟随 */
     const nearBottom = useRef(true);
     const prevFocus = useRef(focus);
+    /** 上一次渲染时窗口里最新一条消息的 id, 用来识别"刚刚新增了一条" */
+    const prevNewestId = useRef<string | null>(null);
     /**
      * 本次进入会话内, 用户是否已经用过"回到上次阅读位置".
      *
@@ -180,6 +184,23 @@ function MessageList(props: Props) {
     useEffect(() => {
         setJumpUsed(false);
     }, [focus]);
+    /**
+     * 窗口有断层时用户发了消息 —— 那条消息进不了当前窗口 (进去会乱序),
+     * 用户会看不见自己刚说的话. 这时直接把他带回最新消息那里.
+     *
+     * 用序号而不是布尔值: 连发几条也要每次都触发
+     */
+    const prevSelfSeq = useRef(selfMessageSeq);
+    useEffect(() => {
+        if (selfMessageSeq === prevSelfSeq.current) {
+            return;
+        }
+        prevSelfSeq.current = selfMessageSeq;
+        if (hasGapAfter) {
+            handleJumpToLatest();
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [selfMessageSeq, hasGapAfter]);
     /** 每个联系人最后一次上报过的已读消息id, 避免重复请求 */
     const reportedRef = useRef<{ [linkmanId: string]: string }>({});
     const rafId = useRef(0);
@@ -440,6 +461,23 @@ function MessageList(props: Props) {
         const isFocusChange = prevFocus.current !== focus;
         prevFocus.current = focus;
 
+        /**
+         * 自己发的消息必须无条件回到底部.
+         *
+         * 否则用户跳回历史位置看旧消息时随手发一句, 消息进了列表最下面,
+         * 视口却还停在上面 —— 看起来就像"发出去了但没发出去"
+         */
+        const messageKeys = Object.keys(messages);
+        const newestId = messageKeys.length
+            ? messageKeys[messageKeys.length - 1]
+            : null;
+        const isNewSelfMessage =
+            !!newestId &&
+            newestId !== prevNewestId.current &&
+            !!messages[newestId].from &&
+            messages[newestId].from._id === selfId;
+        prevNewestId.current = newestId;
+
         const intent = scrollIntent.current;
         scrollIntent.current = null;
         // 请求飞行途中用户切走了, 这个意图属于别的会话, 丢弃
@@ -477,11 +515,17 @@ function MessageList(props: Props) {
             }
         }
 
+        if (isNewSelfMessage) {
+            nearBottom.current = true;
+            $div.scrollTop = $div.scrollHeight;
+            return;
+        }
+
         // 没有特别指定时, 只有用户本来就贴着底部才跟随新消息
         if (nearBottom.current) {
             $div.scrollTop = $div.scrollHeight;
         }
-    }, [messages, focus]);
+    }, [messages, focus, selfId]);
 
     // 内容变化后补一次已读上报, 覆盖"整屏还没撑满"的场景
     useEffect(() => {
