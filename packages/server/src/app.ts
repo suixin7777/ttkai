@@ -44,9 +44,24 @@ app.use(async (ctx, next) => {
         /\/invite\/group\/[\w\d]+/.test(ctx.request.url) ||
         !/(\.)|(\/invite\/group\/[\w\d]+)/.test(ctx.request.url)
     ) {
+        /**
+         * index.html 绝对不能长缓存.
+         *
+         * 它是整个应用的入口, 里面写死了带哈希的 js 文件名. 缓存 7 天意味着
+         * 发版之后最长 7 天里, 用户和中间的反向代理都还拿着旧的入口文件,
+         * 于是加载的仍然是旧版本 —— 换句话说, 部署了等于没部署.
+         *
+         * 而且这不只是浏览器的事: Nginx 的 proxy_cache 是按上游返回的
+         * Cache-Control 来决定缓存时长的, 上游说 max-age=604800,
+         * 它就真的把入口文件缓存七天, 前面再怎么加 `add_header no-cache` 也没用
+         *
+         * 带哈希的静态资源(下面那段 koaStatic)反过来, 应该尽量长缓存 ——
+         * 文件名变了就是新文件, 天然不存在失效问题
+         */
+        ctx.set('Cache-Control', 'no-cache');
         await koaSend(ctx, 'index.html', {
             root: path.join(__dirname, '../public'),
-            maxage: 1000 * 60 * 60 * 24 * 7,
+            maxage: 0,
             gzip: true,
         });
     } else {
