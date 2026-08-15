@@ -109,6 +109,20 @@ export interface Linkman extends Group, User {
     unreadSnapshot?: number;
     /** 跳转锚点, 用于滚动定位和画未读分隔线 */
     anchorMessageId?: string | null;
+
+    /**
+     * 会话级阅读锚点 —— 进入会话那一刻"上次读到哪"的快照.
+     *
+     * 为什么不复用上面两个: anchorMessageId 归 SetLinkmanMessagesWindow 所有,
+     * unreadSnapshot 是侧边栏角标的口径. 谁都不能借用, 否则会互相污染
+     *
+     * 这份状态只活在内存里, 永不落库 —— 服务端 createOrUpdateHistory 是严格单调的,
+     * 往回写本来也写不进去. 关掉标签页就没了, 这正是"会话级"的含义
+     */
+    sessionAnchorId?: string | null;
+    sessionAnchorCreateTime?: number | null;
+    /** 钉住那一刻的未读数, 消息还在窗口里时会用实时计算的值覆盖它 */
+    sessionAnchorUnread?: number;
 }
 
 export interface LinkmansMap {
@@ -294,6 +308,57 @@ function initLinkmanFields(linkman: Linkman, type: string) {
     linkman.lastReadCreateTime = null;
     linkman.unreadSnapshot = 0;
     linkman.anchorMessageId = null;
+    // 必须一起重置: 退出登录不会刷新页面, 而默认群的 id 是所有账号共用的,
+    // 漏了这几个字段就会把上一个账号的阅读位置泄漏给下一个账号
+    linkman.sessionAnchorId = null;
+    linkman.sessionAnchorCreateTime = null;
+    linkman.sessionAnchorUnread = 0;
+}
+
+/** 落库消息的 id 形态, 上传中的乐观消息用的是 `${linkmanId}${Date.now()}` */
+const ObjectIdShape = /^[0-9a-f]{24}$/i;
+
+type SessionAnchor = {
+    sessionAnchorId: string | null;
+    sessionAnchorCreateTime: number | null;
+    sessionAnchorUnread: number;
+};
+
+/** 清空的会话锚点, 表示"这个会话没什么可跳回去的" */
+const EmptySessionAnchor: SessionAnchor = {
+    sessionAnchorId: null,
+    sessionAnchorCreateTime: null,
+    sessionAnchorUnread: 0,
+};
+
+/**
+ * 进入会话时决定要不要钉一个阅读锚点.
+ *
+ * 条件不满足时返回空锚点而不是保留旧的 —— 用 unread 而不是 unreadSnapshot 判断,
+ * 否则一个陈旧的锚点会自己养活自己, 每次重进都续命一次
+ */
+function pickSessionAnchor(linkman: Linkman): SessionAnchor {
+    if (!linkman.unread || linkman.unread <= 0) {
+        return EmptySessionAnchor;
+    }
+    const messageId = linkman.lastReadMessageId;
+    // 临时会话 (陌生人私聊) 的 unread 是硬塞的 1, 并没有真实阅读位置;
+    // 上传中的乐观消息 id 也不是 ObjectId, 都不能拿来当锚点
+    if (!messageId || !ObjectIdShape.test(messageId)) {
+        return EmptySessionAnchor;
+    }
+    const loaded = linkman.messages[messageId];
+    const createTime = loaded
+        ? new Date(loaded.createTime).getTime()
+        : linkman.lastReadCreateTime;
+    if (createTime === null || createTime === undefined || !Number.isFinite(createTime)) {
+        return EmptySessionAnchor;
+    }
+    return {
+        sessionAnchorId: messageId,
+        sessionAnchorCreateTime: createTime,
+        sessionAnchorUnread: linkman.unread,
+    };
 }
 
 /**
@@ -449,6 +514,12 @@ function reducer(state: State = initialState, action: Action): State {
                             lastReadMessageId: existing.lastReadMessageId,
                             lastReadCreateTime: existing.lastReadCreateTime,
                             anchorMessageId: existing.anchorMessageId,
+                            // 断线重连会整套重跑登录流程, 这里不带上就会把
+                            // 用户正看着的那条分隔线弄丢
+                            sessionAnchorId: existing.sessionAnchorId,
+                            sessionAnchorCreateTime:
+                                existing.sessionAnchorCreateTime,
+                            sessionAnchorUnread: existing.sessionAnchorUnread,
                         };
                     }
                 });
@@ -515,6 +586,21 @@ function reducer(state: State = initialState, action: Action): State {
             const linkman = state.linkmans[focus];
 
             /**
+             * 只有"真正切进来"才重新钉锚点.
+             * Linkman 的点击是无条件 dispatch 的, 连点当前已经打开的会话也会走这里,
+             * 少了这个判断, 随手一点就会拿 unread === 0 去重算, 把锚点清掉
+             */
+            const isEnteringLinkman = state.focus !== focus;
+            const sessionAnchor = isEnteringLinkman
+                ? pickSessionAnchor(linkman)
+                : {
+                    sessionAnchorId: linkman.sessionAnchorId ?? null,
+                    sessionAnchorCreateTime:
+                          linkman.sessionAnchorCreateTime ?? null,
+                    sessionAnchorUnread: linkman.sessionAnchorUnread ?? 0,
+                };
+
+            /**
              * 为了优化性能
              * 如果目标联系人的旧消息个数超过50条, 仅保留50条
              */
@@ -523,10 +609,28 @@ function reducer(state: State = initialState, action: Action): State {
             let reserveMessages = messages;
             let { oldestCreateTime, oldestId, hasMoreBefore } = linkman;
             if (messageKeys.length > 50) {
-                reserveMessages = deleteObjectKeys(
-                    messages,
-                    messageKeys.slice(0, messageKeys.length - 50),
-                );
+                /**
+                 * 裁剪不能把锚点本身裁掉.
+                 * "进群时已经堆了 50+ 条流进来的消息"恰恰是这个功能存在的理由,
+                 * 在这条路径上丢掉锚点等于丢掉分隔线. 锚点之后的消息数量
+                 * 由 AddLinkmanMessage 的 200 条上限兜底, 不会无限增长
+                 */
+                let dropCount = messageKeys.length - 50;
+                if (sessionAnchor.sessionAnchorId) {
+                    const anchorIndex = messageKeys.indexOf(
+                        sessionAnchor.sessionAnchorId,
+                    );
+                    if (anchorIndex >= 0) {
+                        dropCount = Math.min(dropCount, anchorIndex);
+                    }
+                }
+                reserveMessages =
+                    dropCount > 0
+                        ? deleteObjectKeys(
+                            messages,
+                            messageKeys.slice(0, dropCount),
+                        )
+                        : messages;
                 /**
                  * 裁剪之后向前翻页的游标必须跟着挪到幸存的最旧一条上,
                  * 否则下次往上翻会从一个已经不在窗口里的位置开始, 中间那段就永远看不到了
@@ -563,6 +667,7 @@ function reducer(state: State = initialState, action: Action): State {
                         oldestCreateTime,
                         oldestId,
                         hasMoreBefore,
+                        ...sessionAnchor,
                     },
                 },
                 focus,
@@ -611,6 +716,16 @@ function reducer(state: State = initialState, action: Action): State {
             );
             const linkmanIds = Object.keys(linkmans);
             const focus = linkmanIds.length > 0 ? linkmanIds[0] : '';
+            /**
+             * 这条路径把焦点挪到了另一个会话, 却不会 dispatch SetFocus,
+             * 所以得在这里补一次钉锚点, 否则用户被动切过去之后就没得跳了
+             */
+            if (focus && linkmans[focus] && focus !== state.focus) {
+                linkmans[focus] = {
+                    ...linkmans[focus],
+                    ...pickSessionAnchor(linkmans[focus]),
+                };
+            }
             return {
                 ...state,
                 linkmans: {
@@ -634,6 +749,42 @@ function reducer(state: State = initialState, action: Action): State {
                 }
                 const messages = getMessagesMap(payload.messages);
                 const newest = getEdgeMessage(messages, 'newest');
+                const existing = linkmans[linkmanId];
+                /**
+                 * 会话锚点只对当前正看着的会话有意义, 其余一律清掉.
+                 *
+                 * 首次登录时焦点是 SetUser 选出来的, 不走 SetFocus,
+                 * 所以还没有锚点的话在这里补钉一次 —— 用服务端刚给的数据来算,
+                 * 这时 unread 和 lastRead* 都是权威值
+                 */
+                let sessionAnchor: SessionAnchor = EmptySessionAnchor;
+                if (linkmanId === state.focus) {
+                    if (existing && existing.sessionAnchorId) {
+                        // 重连时保住用户眼前那条线; 窗口被换成最新 15 条了,
+                        // 但锚点自带时间戳, 点一下还能把那段捞回来
+                        sessionAnchor = {
+                            sessionAnchorId: existing.sessionAnchorId,
+                            sessionAnchorCreateTime:
+                                existing.sessionAnchorCreateTime ?? null,
+                            sessionAnchorUnread:
+                                existing.sessionAnchorUnread ?? 0,
+                        };
+                    } else {
+                        sessionAnchor = pickSessionAnchor({
+                            ...linkmans[linkmanId],
+                            messages,
+                            unread: payload.unread,
+                            lastReadMessageId: fallback(
+                                payload.lastReadMessageId,
+                                null,
+                            ),
+                            lastReadCreateTime: fallback(
+                                payload.lastReadCreateTime,
+                                null,
+                            ),
+                        } as Linkman);
+                    }
+                }
                 // @ts-ignore
                 newState.linkmans[linkmanId] = {
                     ...linkmans[linkmanId],
@@ -661,6 +812,7 @@ function reducer(state: State = initialState, action: Action): State {
                     hasGapAfter: false,
                     anchorMessageId: null,
                     unreadSnapshot: payload.unread,
+                    ...sessionAnchor,
                 };
             });
             return newState;
@@ -728,12 +880,23 @@ function reducer(state: State = initialState, action: Action): State {
              * 跳回上次阅读位置拿到的是一段和实时消息不相连的窗口, 如果和旧内容合并,
              * map 里就会同时存在两段不连续的消息, 而顺序完全靠插入顺序维持, 必然错乱
              */
+            /**
+             * 只有"跳到的正好是钉住的那个锚点"才保留会话锚点.
+             *
+             * 跳回最新 (handleJumpToLatest) 传的是 null, 于是锚点被清掉, 正确;
+             * 万一服务端旧版本忽略了客户端指定的锚点、返回了别的位置,
+             * 这里也会把锚点清掉而不是悄悄改指向 —— 提示条消失, 但不会骗人
+             */
+            const keepSessionAnchor =
+                !!linkman.sessionAnchorId &&
+                payload.anchorMessageId === linkman.sessionAnchorId;
             return {
                 ...state,
                 linkmans: {
                     ...state.linkmans,
                     [payload.linkmanId]: {
                         ...linkman,
+                        ...(keepSessionAnchor ? {} : EmptySessionAnchor),
                         messages: getMessagesMap(payload.messages),
                         oldestCreateTime: payload.oldestCreateTime,
                         oldestId: payload.oldestId,
@@ -781,6 +944,13 @@ function reducer(state: State = initialState, action: Action): State {
                             linkman.newestId as string | null,
                         ),
                         hasGapAfter: payload.hasGapAfter,
+                        /**
+                         * 断层合上了, 说明用户已经从锚点一路读到了实时消息,
+                         * 这段补课结束, 锚点该退休了
+                         */
+                        ...(payload.hasGapAfter === false
+                            ? EmptySessionAnchor
+                            : {}),
                     },
                 },
             };
@@ -811,6 +981,14 @@ function reducer(state: State = initialState, action: Action): State {
                             payload.unread,
                             linkman.unreadSnapshot as number,
                         ),
+                        /**
+                         * 只有"×"(全部标记已读)会带这个标记.
+                         * reportRead 不带 —— 它只是如实上报进度, 不该把用户
+                         * 眼前那条分隔线抹掉
+                         */
+                        ...(payload.clearSessionAnchor
+                            ? EmptySessionAnchor
+                            : {}),
                     },
                 },
             };

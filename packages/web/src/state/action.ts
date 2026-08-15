@@ -129,6 +129,12 @@ export interface SetLinkmanReadStatePayload {
     lastReadMessageId?: string | null;
     lastReadCreateTime?: number | null;
     unread?: number;
+    /**
+     * 是否连会话锚点一起清掉.
+     * 只有"全部标记已读"该传 true; 普通的已读上报不传, 否则用户正在看的
+     * 那条未读分隔线会被自己的滚动动作抹掉
+     */
+    clearSessionAnchor?: boolean;
 }
 
 export type IncrementLinkmanUnreadPayload = string;

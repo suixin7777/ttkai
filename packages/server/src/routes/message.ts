@@ -995,19 +995,45 @@ export async function getLinkmanMessagesAfter(
  * 甚至锚点消息已经被管理员硬删了 (此时时间戳依然有效), 都能正确定位
  */
 export async function getLinkmanUnreadContext(
-    ctx: Context<{ linkmanId: string; count?: number }>,
+    ctx: Context<{
+        linkmanId: string;
+        count?: number;
+        /**
+         * 客户端指定的锚点, 可选.
+         *
+         * 不传时用服务端 History 里的阅读位置. 但客户端在"会话内跳转"这个场景里
+         * 必须自己指定: 用户点开会话后前端已经上报过已读, History 已经推到最新,
+         * 这时再让服务端决定锚点, 那个叫"回到上次阅读位置"的按钮会把人送到最底部
+         */
+        anchorMessageId?: string;
+        anchorCreateTime?: number;
+    }>,
 ) {
-    const { linkmanId, count } = ctx.data;
+    const { linkmanId, count, anchorMessageId, anchorCreateTime } = ctx.data;
     assert(
         typeof linkmanId === 'string' && linkmanId.length > 0,
         '无效的联系人ID',
     );
 
     const limit = normalizeCount(count, EachFetchMessagesCount);
-    const anchorMap = await getReadAnchors(ctx.socket.user.toString(), [
-        linkmanId,
-    ]);
-    const anchor = anchorMap[linkmanId];
+
+    let anchor: { messageId: string; createTime: Date | null } | null = null;
+    if (
+        typeof anchorCreateTime === 'number' &&
+        Number.isFinite(anchorCreateTime)
+    ) {
+        // 客户端给了锚点就用客户端的, id 可以不合法 (比如消息已被硬删), 时间戳才是关键
+        anchor = {
+            messageId:
+                typeof anchorMessageId === 'string' ? anchorMessageId : '',
+            createTime: new Date(anchorCreateTime),
+        };
+    } else {
+        const anchorMap = await getReadAnchors(ctx.socket.user.toString(), [
+            linkmanId,
+        ]);
+        anchor = anchorMap[linkmanId] || null;
+    }
 
     // 没有阅读记录就等于已经读完了, 直接给最新的一屏
     if (!anchor || !anchor.createTime) {

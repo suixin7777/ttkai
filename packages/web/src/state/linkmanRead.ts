@@ -48,6 +48,48 @@ export function hasPendingJumpToLastRead(linkman?: Linkman | null): boolean {
  * 点进一个会话时 unread 会被清零, 但用户可能只是瞄了一眼并没有真的读 ——
  * 这时仍然欠着一次跳转, 就继续用快照里的数字, 免得列表看起来"已经读完了"
  */
+/**
+ * 会话锚点之后有多少条消息.
+ *
+ * 优先按窗口实时算 —— 用户站在会话里时消息还在源源不断地来, 显示钉住那一刻的
+ * 旧数字会越来越不准. 锚点不在窗口里 (被裁掉/被硬删) 时退回快照
+ */
+export function getSessionAnchorUnread(linkman?: Linkman | null): number {
+    if (!linkman || !linkman.sessionAnchorId) {
+        return 0;
+    }
+    if (!linkman.hasGapAfter) {
+        const keys = Object.keys(linkman.messages || {});
+        const index = keys.indexOf(linkman.sessionAnchorId);
+        if (index >= 0) {
+            // map 的插入顺序就是时间顺序, 且没有断层, 所以直接数后面有几条
+            return keys.length - 1 - index;
+        }
+    }
+    return linkman.sessionAnchorUnread || 0;
+}
+
+/**
+ * 聊天区底部要不要显示"回到上次阅读位置".
+ *
+ * 两种情况都算数:
+ *  - 钉住了会话锚点 (进会话时有未读). 这时不要求锚点落在窗口外 ——
+ *    消息可能早就通过 socket 推到本地了, 但用户依然需要一个"我看到哪了"的参照
+ *  - 老判断: 锚点在已加载窗口之外. 原样保留, 保证刷新后那条路径完全不变
+ */
+export function shouldShowJumpToLastRead(linkman?: Linkman | null): boolean {
+    if (!linkman || linkman.hasGapAfter) {
+        return false;
+    }
+    const pinned =
+        linkman.sessionAnchorId !== null &&
+        linkman.sessionAnchorId !== undefined &&
+        linkman.sessionAnchorCreateTime !== null &&
+        linkman.sessionAnchorCreateTime !== undefined &&
+        getSessionAnchorUnread(linkman) > 0;
+    return pinned || hasPendingJumpToLastRead(linkman);
+}
+
 export function getDisplayUnread(linkman?: Linkman | null): number {
     if (!linkman) {
         return 0;

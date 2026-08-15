@@ -3,7 +3,10 @@ import { useSelector } from 'react-redux';
 
 import { css } from 'linaria';
 import { State, Message, MessagesMap } from '../../state/reducer';
-import { hasPendingJumpToLastRead } from '../../state/linkmanRead';
+import {
+    shouldShowJumpToLastRead,
+    getSessionAnchorUnread,
+} from '../../state/linkmanRead';
 import useIsLogin from '../../hooks/useIsLogin';
 import useAction from '../../hooks/useAction';
 import {
@@ -111,7 +114,15 @@ function MessageList(props: Props) {
     const hasGapAfter = !!(linkman && linkman.hasGapAfter);
     const hasMoreBefore = !linkman || linkman.hasMoreBefore !== false;
     const unreadSnapshot = (linkman && linkman.unreadSnapshot) || 0;
-    const anchorMessageId = (linkman && linkman.anchorMessageId) || null;
+    const sessionAnchorId = (linkman && linkman.sessionAnchorId) || null;
+    const sessionAnchorCreateTime =
+        (linkman && linkman.sessionAnchorCreateTime) || null;
+    /**
+     * 画分隔线用的锚点: 会话锚点优先.
+     * 这样一进会话就能看到"读到哪了", 不用非得先跳一次
+     */
+    const anchorMessageId =
+        sessionAnchorId || (linkman && linkman.anchorMessageId) || null;
     const lastReadCreateTime =
         linkman && linkman.lastReadCreateTime !== undefined
             ? linkman.lastReadCreateTime
@@ -208,13 +219,25 @@ function MessageList(props: Props) {
             }
             reportedRef.current[focus] = messageId;
             updateHistory(focus, messageId);
+            /**
+             * 时间戳必须和 id 一起更新.
+             *
+             * 只推进 id 的话, lastReadCreateTime 会一直停在旧值, 等窗口滚动到
+             * oldestCreateTime 超过它, canReportRead() 就永久返回 false,
+             * 本次会话剩下的时间里已读再也上报不出去 —— 未读会在服务端悄悄堆积,
+             * 直到下次刷新或者在别的设备上才暴露出来
+             */
+            const reported = messages[messageId];
             action.setLinkmanReadState({
                 linkmanId: focus,
                 lastReadMessageId: messageId,
+                lastReadCreateTime: reported
+                    ? new Date(reported.createTime).getTime()
+                    : undefined,
                 unread: 0,
             });
         },
-        [isLogin, focus, canReportRead, getNewestPersistedId, action],
+        [isLogin, focus, canReportRead, getNewestPersistedId, action, messages],
     );
 
     /** 向前 (更旧) 翻一页 */
@@ -450,9 +473,44 @@ function MessageList(props: Props) {
         if (!focus || !isLogin) {
             return;
         }
+
+        /**
+         * 锚点消息就在本地窗口里, 直接滚过去 —— 不发请求, 不改 state.
+         *
+         * 这是"没刷新就点进有未读的会话"的常见情况: 那些消息本来就是推过来的,
+         * 一直在内存里. 这里不能用 scrollIntent, 因为应用它的 layout effect
+         * 依赖 [messages, focus], 这两个都没变, effect 不会重跑
+         */
+        if (sessionAnchorId && !hasGapAfter && messages[sessionAnchorId]) {
+            const $div = $list.current;
+            const target = $div
+                ? $div.querySelector(
+                    `[data-message-id="${sessionAnchorId}"]`,
+                )
+                : null;
+            if (target) {
+                target.scrollIntoView({ block: 'center' });
+                nearBottom.current = false;
+                return;
+            }
+        }
+
         const context = await getLinkmanUnreadContext(
             focus,
             ForwardFetchCount,
+            /**
+             * 锚点必须由客户端指定.
+             *
+             * 服务端是从 History 里取锚点的, 而用户点开会话时前端已经上报过已读,
+             * History 早就推到最新了 —— 让服务端决定的话, 这个叫"回到上次阅读位置"
+             * 的按钮会把人直接送到最底部, 顺带把锚点也冲掉
+             */
+            sessionAnchorId
+                ? {
+                    anchorMessageId: sessionAnchorId,
+                    anchorCreateTime: sessionAnchorCreateTime as number,
+                }
+                : undefined,
         );
         if (!context) {
             return;
@@ -471,7 +529,12 @@ function MessageList(props: Props) {
             hasMoreBefore: true,
             hasGapAfter: context.hasMoreAfter,
             anchorMessageId: context.anchorMessageId,
-            unread: context.unread,
+            /**
+             * 钉住锚点的这条路径不要传 unread ——
+             * SetLinkmanMessagesWindow 会拿它去写 unreadSnapshot,
+             * 而此刻服务端算出来的 unread 已经是 0 了, 传过去会把侧边栏角标清掉
+             */
+            unread: sessionAnchorId ? undefined : context.unread,
         });
     }
 
@@ -507,13 +570,43 @@ function MessageList(props: Props) {
             anchorMessageId: null,
             unread: 0,
         });
-        reportedRef.current[focus] = '';
+        /**
+         * 必须把已读同步给服务端.
+         *
+         * "跳到最新"是用户主动放弃补课, 和点"×"是一个意思. 只在本地把 unread 清零
+         * 而不上报的话, 服务端的阅读位置会永远停在积压之前 —— 于是之后每次
+         * canReportRead() 都判定锚点在窗口外而拒绝上报, 未读数就此永久卡死,
+         * 客户端显示 0、服务端却还记着上百条
+         *
+         * 这里不能调 reportRead(): 它从闭包里读 messages, 而此刻组件还没重渲染,
+         * 拿到的是替换之前的旧窗口. 直接用刚拉到的这一页的最新一条
+         */
+        if (page.newestId) {
+            reportedRef.current[focus] = page.newestId;
+            updateHistory(focus, page.newestId);
+            action.setLinkmanReadState({
+                linkmanId: focus,
+                lastReadMessageId: page.newestId,
+                lastReadCreateTime: page.newestCreateTime,
+                unread: 0,
+                clearSessionAnchor: true,
+            });
+        } else {
+            reportedRef.current[focus] = '';
+        }
     }
 
     /** 忽略积压, 直接全部标记为已读 */
     function handleDismissUnread(e: React.MouseEvent) {
         e.stopPropagation();
-        action.setLinkmanReadState({ linkmanId: focus, unread: 0 });
+        action.setLinkmanReadState({
+            linkmanId: focus,
+            unread: 0,
+            // 明确把会话锚点也清掉, 不要指望 unread 归零的副作用
+            clearSessionAnchor: true,
+        });
+        // 不重置这个, 强制上报会在去重那一步被短路掉, 什么都发不出去
+        reportedRef.current[focus] = '';
         reportRead(true);
     }
 
@@ -556,7 +649,11 @@ function MessageList(props: Props) {
      * 上次阅读位置还在当前窗口之外时才提示跳转.
      * 都已经看得到了就没必要再让用户点一下
      */
-    const showJumpToLastRead = isLogin && hasPendingJumpToLastRead(linkman);
+    const showJumpToLastRead = isLogin && shouldShowJumpToLastRead(linkman);
+    /** 提示条上的数字: 钉住锚点时按窗口实时算, 否则沿用快照 */
+    const jumpUnreadCount = sessionAnchorId
+        ? getSessionAnchorUnread(linkman)
+        : unreadSnapshot;
 
     const messageList = Object.values(messages);
 
@@ -613,7 +710,7 @@ function MessageList(props: Props) {
                 >
                     <span>
                         {`回到上次阅读位置 · ${
-                            unreadSnapshot > 99 ? '99+' : unreadSnapshot
+                            jumpUnreadCount > 99 ? '99+' : jumpUnreadCount
                         }条未读`}
                     </span>
                     <span

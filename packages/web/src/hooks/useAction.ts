@@ -114,6 +114,7 @@ export default function useAction() {
             lastReadMessageId?: string | null;
             lastReadCreateTime?: number | null;
             unread?: number;
+            clearSessionAnchor?: boolean;
         }) {
             dispatch({
                 type: ActionTypes.SetLinkmanReadState,

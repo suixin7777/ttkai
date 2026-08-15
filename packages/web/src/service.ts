@@ -412,10 +412,16 @@ export type UnreadContext = MessagePage & {
 export async function getLinkmanUnreadContext(
     linkmanId: string,
     count?: number,
+    /**
+     * 由客户端指定锚点. 不传就用服务端 History 里的阅读位置.
+     * 会话内跳转必须传 —— 那时 History 已经被上报推到最新了
+     */
+    anchor?: { anchorMessageId: string; anchorCreateTime: number },
 ): Promise<UnreadContext | null> {
     const [, context] = await fetch<UnreadContext>('getLinkmanUnreadContext', {
         linkmanId,
         count,
+        ...(anchor || {}),
     });
     return context;
 }
