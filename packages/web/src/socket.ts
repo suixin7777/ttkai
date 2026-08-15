@@ -37,22 +37,38 @@ async function loginFailback() {
         platform.name,
         platform.description,
     );
-    if (defaultGroup) {
-        const { messages } = defaultGroup;
+    if (!defaultGroup) {
+        /**
+         * 游客登录也失败了, 最常见的原因是 IP 被封进了小黑屋.
+         *
+         * 这里什么都不做的话, state 里既没有 user 也没有任何联系人,
+         * Chat 组件会直接返回一个空 div —— 用户只看到一闪而过的 toast,
+         * 然后对着一整片空白, 没有任何可以操作的东西, 看起来就像卡死了
+         *
+         * 把登录框弹出来: 封禁到期后可以直接登录, 没到期也能看到明确的报错,
+         * 而不是一个说不清哪里坏了的白屏
+         */
         dispatch({
-            type: ActionTypes.SetGuest,
-            payload: defaultGroup,
+            type: ActionTypes.SetStatus,
+            payload: { key: 'loginRegisterDialogVisible', value: true },
         });
-
-        messages.forEach(convertMessage);
-        dispatch({
-            type: ActionTypes.AddLinkmanHistoryMessages,
-            payload: {
-                linkmanId: defaultGroup._id,
-                messages,
-            },
-        });
+        return;
     }
+
+    const { messages } = defaultGroup;
+    dispatch({
+        type: ActionTypes.SetGuest,
+        payload: defaultGroup,
+    });
+
+    messages.forEach(convertMessage);
+    dispatch({
+        type: ActionTypes.AddLinkmanHistoryMessages,
+        payload: {
+            linkmanId: defaultGroup._id,
+            messages,
+        },
+    });
 }
 
 socket.on('connect', async () => {
