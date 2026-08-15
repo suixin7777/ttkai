@@ -74,8 +74,16 @@ async function loginFailback() {
 socket.on('connect', async () => {
     dispatch({ type: ActionTypes.Connect, payload: '' });
 
-    await initOSS();
-    dispatch({ type: ActionTypes.Ready, payload: '' });
+    /**
+     * OSS 初始化不要阻塞登录.
+     *
+     * 它只影响图片上传和背景图 —— status.ready 唯一的用途就是决定背景图 URL
+     * 怎么拼. 而原来是 await 完它才开始登录, 等于每次连接(包括退出登录后
+     * 重连成游客)都白白串行多等一个完整往返, 用户就是在这段时间里对着空界面
+     */
+    initOSS()
+        .then(() => dispatch({ type: ActionTypes.Ready, payload: '' }))
+        .catch(() => dispatch({ type: ActionTypes.Ready, payload: '' }));
 
     const token = window.localStorage.getItem('token');
     if (token) {
