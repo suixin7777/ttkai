@@ -1,4 +1,10 @@
-import React, { useRef, useCallback, useLayoutEffect, useEffect } from 'react';
+import React, {
+    useRef,
+    useCallback,
+    useLayoutEffect,
+    useEffect,
+    useState,
+} from 'react';
 import { useSelector } from 'react-redux';
 
 import { css } from 'linaria';
@@ -161,6 +167,19 @@ function MessageList(props: Props) {
     /** 用户当前是否贴着底部, 在滚动时持续记录, 供提交后判断要不要跟随 */
     const nearBottom = useRef(true);
     const prevFocus = useRef(focus);
+    /**
+     * 本次进入会话内, 用户是否已经用过"回到上次阅读位置".
+     *
+     * 用过就把提示条收起来 —— 它的任务是"把你送回读到的地方", 送到了就该退场,
+     * 一直挂着反而像个赖着不走的弹窗. 但分隔线要留着, 那是"你读到哪"的标记
+     *
+     * 注意不能靠清除会话锚点来实现: 锚点一清, 分隔线跟着就没了
+     */
+    const [jumpUsed, setJumpUsed] = useState(false);
+    // 换会话就重新给一次机会, 否则用过一次之后所有会话都不再提示了
+    useEffect(() => {
+        setJumpUsed(false);
+    }, [focus]);
     /** 每个联系人最后一次上报过的已读消息id, 避免重复请求 */
     const reportedRef = useRef<{ [linkmanId: string]: string }>({});
     const rafId = useRef(0);
@@ -530,6 +549,7 @@ function MessageList(props: Props) {
             if (target) {
                 target.scrollIntoView({ block: 'center' });
                 nearBottom.current = false;
+                setJumpUsed(true);
                 return;
             }
         }
@@ -554,6 +574,7 @@ function MessageList(props: Props) {
         if (!context) {
             return;
         }
+        setJumpUsed(true);
         scrollIntent.current = {
             linkmanId: focus,
             type: 'anchor',
@@ -689,7 +710,8 @@ function MessageList(props: Props) {
      * 上次阅读位置还在当前窗口之外时才提示跳转.
      * 都已经看得到了就没必要再让用户点一下
      */
-    const showJumpToLastRead = isLogin && shouldShowJumpToLastRead(linkman);
+    const showJumpToLastRead =
+        isLogin && !jumpUsed && shouldShowJumpToLastRead(linkman);
     /** 提示条上的数字: 钉住锚点时按窗口实时算, 否则沿用快照 */
     const jumpUnreadCount = sessionAnchorId
         ? getSessionAnchorUnread(linkman)
