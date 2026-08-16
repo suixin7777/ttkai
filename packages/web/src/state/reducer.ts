@@ -499,7 +499,14 @@ export const initialState: State = {
     connect: false,
     status: {
         ready: false,
-        loginRegisterDialogVisible: false,
+        /**
+         * 本地没有 token 就直接把登录框摆出来.
+         *
+         * 不这样的话, 从打开页面到 socket 连上、发现没登录、再 dispatch 显示,
+         * 中间有一段空窗期是完全空白的界面. 有 token 时不弹 ——
+         * 让它先去静默登录, 失败了 socket.ts 会再把这个开关打开
+         */
+        loginRegisterDialogVisible: !window.localStorage.getItem('token'),
         theme: localStorage.theme,
         primaryColor: localStorage.primaryColor,
         primaryTextColor: localStorage.primaryTextColor,
@@ -652,6 +659,13 @@ function reducer(state: State = initialState, action: Action): State {
                 ...initialState,
                 status: {
                     ...state.status,
+                    /**
+                     * 退出登录后立刻把登录框摆出来.
+                     *
+                     * 不这样的话, 从点退出到 socket 重连上、发现没登录、再打开登录框
+                     * 中间有一段空窗期 —— 而现在没有游客模式, 那段时间界面是全空的
+                     */
+                    loginRegisterDialogVisible: true,
                 },
             };
         }

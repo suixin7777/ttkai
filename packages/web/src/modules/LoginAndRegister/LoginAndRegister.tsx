@@ -23,7 +23,14 @@ function LoginAndRegister() {
     return (
         <Dialog
             visible={loginRegisterDialogVisible}
+            /**
+             * 三个都要关掉才是真的关不掉:
+             * closable 只是隐藏右上角的 X, 点遮罩和按 ESC 依然能把它关了,
+             * 而这个应用不登录就没有任何内容可看, 关掉只会留下一片空白
+             */
             closable={false}
+            maskClosable={false}
+            keyboard={false}
             onClose={() => action.toggleLoginRegisterDialog(false)}
         >
             <Tabs
