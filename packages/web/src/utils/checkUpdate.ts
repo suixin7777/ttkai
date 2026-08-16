@@ -81,9 +81,79 @@ async function hardReload(latest: string) {
     return true;
 }
 
+/** 页面还开着时, 等多久自动更新 */
+const AutoReloadDelay = 1000 * 15;
+let autoReloadTimer = 0;
+
+/**
+ * 用户有没有还没发出去的输入 —— 有的话刷新会把内容吞掉
+ *
+ * 光标停在输入框里也算, 哪怕还没打字: 这种时候页面自己刷掉一样很突兀.
+ * 登录框里的账号密码同样受这条保护
+ */
+/**
+ * 同时看 property 和 attribute.
+ * isContentEditable 是浏览器算出来的, 有的环境(比如测试用的 jsdom)根本不实现,
+ * 只认它会让可编辑区域整个漏判
+ */
+function isEditable(el: HTMLElement): boolean {
+    return (
+        el.isContentEditable || el.getAttribute('contenteditable') === 'true'
+    );
+}
+
+export function hasUnsavedInput(): boolean {
+    const active = document.activeElement as HTMLElement | null;
+    if (
+        active &&
+        (active.tagName === 'INPUT' ||
+            active.tagName === 'TEXTAREA' ||
+            isEditable(active))
+    ) {
+        return true;
+    }
+    const fields = document.querySelectorAll(
+        'input, textarea, [contenteditable="true"]',
+    );
+    for (let i = 0; i < fields.length; i += 1) {
+        const field = fields[i] as HTMLInputElement;
+        const text = isEditable(field)
+            ? field.innerText || field.textContent || ''
+            : field.value || '';
+        if (text.trim()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * 页面一直开着也要能更新到.
+ *
+ * 只靠"切走标签页才刷"的话, 一个从不切走的用户就永远停在旧版本上.
+ * 但到点时如果人正在打字, 就顺延一轮再看 —— 宁可晚点更新,
+ * 也不能把用户没发出去的话刷没了
+ */
+function scheduleAutoReload(latest: string) {
+    if (autoReloadTimer) {
+        return;
+    }
+    autoReloadTimer = window.setTimeout(() => {
+        autoReloadTimer = 0;
+        if (!pendingVersion) {
+            return;
+        }
+        if (!document.hidden && hasUnsavedInput()) {
+            scheduleAutoReload(latest);
+            return;
+        }
+        hardReload(latest);
+    }, AutoReloadDelay);
+}
+
 /**
  * 有新版本时不能立刻刷 —— 用户可能正在输入框里打字, 刷了就全没了.
- * 页面不可见 (切走了标签页) 时才真正执行, 这时刷新对用户是无感的
+ * 页面不可见时直接刷 (这时对用户是无感的), 否则先提示再等一会儿
  */
 function applyWhenSafe(latest: string) {
     pendingVersion = latest;
@@ -93,8 +163,10 @@ function applyWhenSafe(latest: string) {
     }
     if (!notified) {
         notified = true;
-        Message.info('已有新版本, 切换标签页后会自动更新', 3);
+        // 不提"标签页": 手机用户没有这个概念, 而且到底等多久取决于用户在不在打字
+        Message.info('已有新版本, 稍后会自动更新', 3);
     }
+    scheduleAutoReload(latest);
 }
 
 export async function checkForUpdate() {
