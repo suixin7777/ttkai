@@ -102,6 +102,15 @@ type ScrollIntent = { linkmanId: string } & (
     | { type: 'bottom' }
     | { type: 'restore'; prevHeight: number; prevTop: number }
     | { type: 'anchor'; messageId: string }
+    /**
+     * 把某条消息钉在视口里的原位置上.
+     *
+     * 向后翻页时用它而不是 restore: restore 算的是
+     * `新高度 - 旧高度 + 旧位置`, 前提是"高度变化全部发生在视口上方" ——
+     * 而向后翻页恰恰是在下方追加, 同时还可能在上方裁剪, 那个算式会算偏.
+     * 按 DOM 元素定位则在"上方删、下方加"同时发生时依然精确
+     */
+    | { type: 'keep'; messageId: string; offset: number }
 );
 
 type Props = {
@@ -343,19 +352,28 @@ function MessageList(props: Props) {
             if (!page) {
                 return;
             }
-            if (page.messages.length > 0) {
+            if (page.messages.length === 0) {
                 /**
-                 * 在 dispatch 之前先记录高度, 提交之后按
-                 * 新高度 - 旧高度 + 旧位置 还原,
-                 * 否则插入的历史消息会把视口整个顶下去
+                 * 空页只意味着"到头了", 不该再走 addLinkmanHistoryMessages ——
+                 * 那个 reducer 即使收到空数组也会造出一个新的 messages 对象,
+                 * 引用一变布局副作用就跟着跑一次, 而这次没有任何滚动意图,
+                 * 于是直接落进兜底分支被弹到底部.
+                 * setLinkmanProperty 保持 messages 引用不变, 不会惊动它
                  */
-                scrollIntent.current = {
-                    linkmanId: focus,
-                    type: 'restore',
-                    prevHeight,
-                    prevTop,
-                };
+                action.setLinkmanProperty(focus, 'hasMoreBefore', page.hasMore);
+                return;
             }
+            /**
+             * 在 dispatch 之前先记录高度, 提交之后按
+             * 新高度 - 旧高度 + 旧位置 还原,
+             * 否则插入的历史消息会把视口整个顶下去
+             */
+            scrollIntent.current = {
+                linkmanId: focus,
+                type: 'restore',
+                prevHeight,
+                prevTop,
+            };
             action.addLinkmanHistoryMessages(focus, page.messages, {
                 oldestCreateTime: page.oldestCreateTime,
                 oldestId: page.oldestId,
@@ -392,6 +410,33 @@ function MessageList(props: Props) {
             });
             if (!page) {
                 return;
+            }
+            /**
+             * 必须留下滚动意图, 否则布局副作用会落到最后那个兜底分支.
+             *
+             * fetchAfter 的唯一调用点在 `if (nearBottom.current)` 里面, 也就是说
+             * 走到这里时 nearBottom 必然是 true —— 兜底分支于是每次都执行
+             * `scrollTop = scrollHeight`, 把用户直接送过刚刚取回来的那 30 条,
+             * 一路弹到最新消息. 用户看到的就是"往下滑一点, 触发加载, 然后跳到最新"
+             *
+             * 这里读 linkmanRef 而不是上面的 current: current 是 await 之前抓的
+             */
+            const $listDiv = $list.current;
+            const keys = Object.keys(linkmanRef.current?.messages || {});
+            const joinId = keys[keys.length - 1];
+            const $join =
+                $listDiv && joinId
+                    ? ($listDiv.querySelector(
+                        `[data-message-id="${joinId}"]`,
+                    ) as HTMLElement | null)
+                    : null;
+            if ($listDiv && $join) {
+                scrollIntent.current = {
+                    linkmanId: focus,
+                    type: 'keep',
+                    messageId: joinId,
+                    offset: $join.offsetTop - $listDiv.scrollTop,
+                };
             }
             action.addLinkmanForwardMessages({
                 linkmanId: focus,
@@ -471,31 +516,56 @@ function MessageList(props: Props) {
         const newestId = messageKeys.length
             ? messageKeys[messageKeys.length - 1]
             : null;
+        /** 最新一条真的换人了吗 —— 区分"追加了消息"和"只是 messages 引用变了" */
+        const isNewestChanged = !!newestId && newestId !== prevNewestId.current;
         const isNewSelfMessage =
-            !!newestId &&
-            newestId !== prevNewestId.current &&
-            !!messages[newestId].from &&
-            messages[newestId].from._id === selfId;
+            isNewestChanged &&
+            !!messages[newestId as string].from &&
+            messages[newestId as string].from._id === selfId;
         prevNewestId.current = newestId;
 
         const intent = scrollIntent.current;
         scrollIntent.current = null;
-        // 请求飞行途中用户切走了, 这个意图属于别的会话, 丢弃
-        if (intent && intent.linkmanId !== focus) {
-            return;
-        }
 
+        /**
+         * 切换会话的重置必须排在"丢弃过期意图"前面.
+         *
+         * prevFocus 在上面已经推进过了, 如果上一个会话的请求正好在这一次提交里
+         * 返回, 下面那个 return 会把这段重置整个跳过 —— 而它是唯一会重置
+         * nearBottom 和滚动位置的地方, 跳过之后新会话就继承了旧会话的状态,
+         * 并且再也没有第二次机会
+         */
         if (isFocusChange) {
-            // 切换会话必须重置位置, 否则会继承上一个会话的 scrollTop
             nearBottom.current = true;
             $div.scrollTop = $div.scrollHeight;
             return;
         }
 
+        // 请求飞行途中用户切走了, 这个意图属于别的会话, 丢弃
+        if (intent && intent.linkmanId !== focus) {
+            return;
+        }
+
+        /**
+         * 每个分支都要明确声明它造成的"贴底状态", 不能沿用上一次的值.
+         * 这几个分支都是把视口挪到别处, 却把 nearBottom 留在原样 ——
+         * 于是紧接着到达的任何一条消息都会读到过期的 true, 把刚定位好的位置冲掉
+         */
         if (intent) {
             if (intent.type === 'restore') {
                 $div.scrollTop =
                     $div.scrollHeight - intent.prevHeight + intent.prevTop;
+                nearBottom.current = false;
+                return;
+            }
+            if (intent.type === 'keep') {
+                const $keep = $div.querySelector(
+                    `[data-message-id="${intent.messageId}"]`,
+                ) as HTMLElement | null;
+                if ($keep) {
+                    $div.scrollTop = $keep.offsetTop - intent.offset;
+                }
+                nearBottom.current = false;
                 return;
             }
             if (intent.type === 'anchor') {
@@ -507,10 +577,12 @@ function MessageList(props: Props) {
                 } else {
                     $div.scrollTop = 0;
                 }
+                nearBottom.current = false;
                 return;
             }
             if (intent.type === 'bottom') {
                 $div.scrollTop = $div.scrollHeight;
+                nearBottom.current = true;
                 return;
             }
         }
@@ -521,8 +593,14 @@ function MessageList(props: Props) {
             return;
         }
 
-        // 没有特别指定时, 只有用户本来就贴着底部才跟随新消息
-        if (nearBottom.current) {
+        /**
+         * 兜底: 必须"真的追加了最新一条", 并且这条到达之前用户就贴着底部.
+         *
+         * 少了 isNewestChanged 这个条件, 任何让 messages 引用变化的操作
+         * (翻页、撤回、跳转、重连拉取) 都会走到这里, 拿上一轮的几何结论
+         * 去决定这一轮要不要弹到底部
+         */
+        if (isNewestChanged && nearBottom.current) {
             $div.scrollTop = $div.scrollHeight;
         }
     }, [messages, focus, selfId]);

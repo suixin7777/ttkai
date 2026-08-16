@@ -1107,7 +1107,25 @@ function reducer(state: State = initialState, action: Action): State {
                 ...linkman.messages,
                 [payload.message._id]: payload.message,
             };
-            const messages = trimMessages(merged);
+            /**
+             * 用户正在看的这个会话不裁剪.
+             *
+             * 裁掉的是视口"上方"的 DOM. 一次删掉上百条(往上翻过历史之后很容易
+             * 攒到这个量), 浏览器要么把内容整体上移, 要么直接把 scrollTop 夹到
+             * 新的最大值 —— 也就是底部. 用户正读着历史就被弹到最新一条.
+             *
+             * 更糟的是这个夹取动作本身会发出一个 scroll 事件, 于是 MessageList
+             * 拿着已经缩水的几何数据重算, nearBottom 被锁死成 true,
+             * 从此任何人发消息都会把用户拽到底部 —— 这就是"别人发消息也跳"的由来
+             *
+             * 上限本来的用途(见 MaxLoadedMessages 的注释)是防止一个你从来不点开的
+             * 活跃群把整场会话堆在内存里 —— 那种会话没有滚动位置可破坏.
+             * 当前会话的内存回收交给 enterHelper: 切走时 enterLinkman 会裁到 50 条
+             */
+            const messages =
+                state.focus === payload.linkmanId
+                    ? merged
+                    : trimMessages(merged);
             const trimmed =
                 Object.keys(messages).length < Object.keys(merged).length;
             const oldest = getEdgeMessage(messages, 'oldest');

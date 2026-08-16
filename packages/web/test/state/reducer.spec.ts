@@ -729,7 +729,7 @@ describe('redux reducer - 阅读位置与消息窗口', () => {
      * 审查发现的回归: 200 条上限裁掉最旧的消息之后, 如果不把 hasMoreBefore
      * 重新打开, 那些消息就再也拉不回来了, 而界面还显示"没有更早的消息了"
      */
-    it('AddLinkmanMessage 裁剪后要重新打开向前翻页', () => {
+    it('AddLinkmanMessage 对非聚焦会话裁剪后要重新打开向前翻页', () => {
         const messages: any = {};
         for (let i = 0; i < 200; i += 1) {
             const id = i.toString(16).padStart(24, '0');
@@ -737,7 +737,8 @@ describe('redux reducer - 阅读位置与消息窗口', () => {
         }
         const state = {
             user: { _id: 'self' },
-            focus: 'g1',
+            // 关键: 裁剪只作用于"不在看"的会话
+            focus: 'other',
             linkmans: {
                 g1: {
                     _id: 'g1',
@@ -771,6 +772,52 @@ describe('redux reducer - 阅读位置与消息窗口', () => {
         );
         // 关键: 被裁掉的那段必须还能翻回来
         expect(g1.hasMoreBefore).toBe(true);
+    });
+
+    /**
+     * 用户正在看的会话不能裁剪 —— 裁掉的是视口上方的 DOM, 浏览器会把 scrollTop
+     * 连带挪走甚至夹到底部, 表现为"读着历史突然被弹到最新一条", 而且之后
+     * 任何人发消息都会继续弹
+     */
+    it('AddLinkmanMessage 不裁剪当前正在看的会话', () => {
+        const messages: any = {};
+        for (let i = 0; i < 200; i += 1) {
+            const id = i.toString(16).padStart(24, '0');
+            messages[id] = { _id: id, createTime: new Date(1000 + i) };
+        }
+        const state = {
+            user: { _id: 'self' },
+            focus: 'g1',
+            linkmans: {
+                g1: {
+                    _id: 'g1',
+                    type: 'group',
+                    messages,
+                    unread: 0,
+                    hasMoreBefore: false,
+                    hasGapAfter: false,
+                },
+            },
+        } as unknown as State;
+
+        const newState = reducer(state, {
+            type: ActionTypes.AddLinkmanMessage,
+            payload: {
+                linkmanId: 'g1',
+                message: {
+                    _id: 'ffffffffffffffffffffffff',
+                    createTime: new Date(99999),
+                    from: { _id: 'other' },
+                },
+            },
+        } as Action);
+
+        const g1 = newState.linkmans.g1;
+        // 涨到 201 条, 最旧那条必须还在
+        expect(Object.keys(g1.messages).length).toBe(201);
+        expect(Object.keys(g1.messages)).toContain('0'.padStart(24, '0'));
+        // 没裁剪就不该动翻页游标
+        expect(g1.hasMoreBefore).toBe(false);
     });
 
     /**
