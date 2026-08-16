@@ -180,6 +180,8 @@ function MessageList(props: Props) {
     const prevFocus = useRef(focus);
     /** 上一次渲染时窗口里最新一条消息的 id, 用来识别"刚刚新增了一条" */
     const prevNewestId = useRef<string | null>(null);
+    /** 上一次见过的最新消息时间戳, 用来区分"真的来了新消息"和"只是换了 id" */
+    const prevNewestCreateTime = useRef(0);
     /**
      * 本次进入会话内, 用户是否已经用过"回到上次阅读位置".
      *
@@ -516,13 +518,30 @@ function MessageList(props: Props) {
         const newestId = messageKeys.length
             ? messageKeys[messageKeys.length - 1]
             : null;
-        /** 最新一条真的换人了吗 —— 区分"追加了消息"和"只是 messages 引用变了" */
-        const isNewestChanged = !!newestId && newestId !== prevNewestId.current;
+        /**
+         * 是否真的来了一条更新的消息.
+         *
+         * 只比 id 不够: 自己发的消息会先以 `${会话id}${时间戳}` 的乐观 id 插进来,
+         * 落库后 UpdateMessage 把它换成真实 ObjectId —— 条数没变、内容没变,
+         * 单看 id 却是"最新一条变了", 于是同一条消息会把视口滚两次
+         *
+         * 时间戳才是可靠依据: 换 key 时 createTime 不变, 真来了新消息才会前进
+         */
+        const newestCreateTime = newestId
+            ? new Date(messages[newestId].createTime).getTime()
+            : 0;
+        const isNewestChanged =
+            !!newestId &&
+            newestId !== prevNewestId.current &&
+            newestCreateTime > prevNewestCreateTime.current;
         const isNewSelfMessage =
             isNewestChanged &&
             !!messages[newestId as string].from &&
             messages[newestId as string].from._id === selfId;
         prevNewestId.current = newestId;
+        if (newestCreateTime > prevNewestCreateTime.current) {
+            prevNewestCreateTime.current = newestCreateTime;
+        }
 
         const intent = scrollIntent.current;
         scrollIntent.current = null;
