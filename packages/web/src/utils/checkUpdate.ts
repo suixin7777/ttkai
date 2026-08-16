@@ -47,6 +47,17 @@ let notified = false;
  */
 async function hardReload(latest: string) {
     /**
+     * 最后一道闸: 要换的版本必须真的和现在跑的不一样.
+     *
+     * 之前出过一次每 15 秒刷新一轮的事故 —— 一个合成出来的假版本号一路走到了
+     * 这里. 只要在真正动手前再核对一次"当前加载的到底是哪个包",
+     * 无论上游哪里判断错了, 都不会演变成无限刷新
+     */
+    if (latest === getLoadedBundleName()) {
+        return false;
+    }
+
+    /**
      * 为同一个版本只尝试一次.
      * 清完缓存刷新后如果还是旧版本, 说明问题不在客户端 (比如中间还有一层代理
      * 在发旧文件), 再刷也没用 —— 这时候安静地放弃, 总好过无限刷新或者无限弹窗
@@ -222,14 +233,24 @@ export default function startUpdateChecker() {
     });
 
     /**
-     * 新的 Service Worker 接管时也刷一次.
-     * 构建配置里开了 skipWaiting + clientsClaim, 新 SW 会立即接管,
-     * 但当前页面仍然跑着旧代码, 必须重新加载才生效
+     * 新 Service Worker 接管时, 只有"确实已经发现新版本"才刷.
+     *
+     * 这里原来是无条件调 applyWhenSafe(pendingVersion || `${current}-sw`),
+     * 那个合成出来的 `-sw` 版本号造成了一个每 15 秒刷新一次的死循环:
+     *
+     *   页面加载新版 -> checkForUpdate 发现版本一致, 删掉防重复刷新的锁
+     *   -> main.tsx 注册 SW, 新 SW 因为 clientsClaim 立即接管
+     *   -> controllerchange 触发, 拿着假版本号安排刷新
+     *   -> 15 秒后锁已经没了, 真的刷 -> 回到第一步
+     *
+     * 之前只在页面切走时才刷, 这条路基本踩不到; 加了定时兜底就暴露了.
+     * 真有新版本的话 checkForUpdate 本来就会发现, 不需要这里代劳
      */
     if ('serviceWorker' in navigator) {
         navigator.serviceWorker.addEventListener('controllerchange', () => {
-            const current = getLoadedBundleName();
-            applyWhenSafe(pendingVersion || `${current}-sw`);
+            if (pendingVersion) {
+                applyWhenSafe(pendingVersion);
+            }
         });
     }
 
