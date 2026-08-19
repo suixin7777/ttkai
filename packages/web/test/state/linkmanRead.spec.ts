@@ -102,6 +102,36 @@ describe('linkmanRead', () => {
         });
     });
 
+    /** 未读太少时不该为它弹提示条 —— 往上滚一下就看到了 */
+    describe('未读数阈值', () => {
+        it('未读 8 条及以下不提示跳转', () => {
+            [1, 3, 7, 8].forEach((n) => {
+                expect(
+                    shouldShowJumpToLastRead(
+                        pendingLinkman({ unread: n, unreadSnapshot: n }),
+                    ),
+                ).toBe(false);
+            });
+        });
+
+        it('未读超过 8 条才提示', () => {
+            [9, 20, 100].forEach((n) => {
+                expect(
+                    shouldShowJumpToLastRead(
+                        pendingLinkman({ unread: n, unreadSnapshot: n }),
+                    ),
+                ).toBe(true);
+            });
+        });
+
+        it('侧边栏角标不受这个阈值影响, 少量未读照样要显示', () => {
+            // 阈值只管"要不要弹跳转提示", 不该顺手把红点也吞掉
+            expect(
+                getDisplayUnread(pendingLinkman({ unread: 3 })),
+            ).toBe(3);
+        });
+    });
+
     describe('getDisplayUnread', () => {
         it('有实时未读时显示实时未读', () => {
             expect(getDisplayUnread(pendingLinkman({ unread: 3 }))).toBe(3);

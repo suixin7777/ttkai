@@ -11,7 +11,7 @@ import { css } from 'linaria';
 import { State, Message, MessagesMap } from '../../state/reducer';
 import {
     shouldShowJumpToLastRead,
-    getSessionAnchorUnread,
+    getJumpUnread,
 } from '../../state/linkmanRead';
 import useIsLogin from '../../hooks/useIsLogin';
 import useAction from '../../hooks/useAction';
@@ -853,10 +853,11 @@ function MessageList(props: Props) {
      */
     const showJumpToLastRead =
         isLogin && !jumpUsed && shouldShowJumpToLastRead(linkman);
-    /** 提示条上的数字: 钉住锚点时按窗口实时算, 否则沿用快照 */
-    const jumpUnreadCount = sessionAnchorId
-        ? getSessionAnchorUnread(linkman)
-        : unreadSnapshot;
+    /**
+     * 提示条上的数字.
+     * 用 linkmanRead 里那个共用函数算, 保证和"要不要显示"的阈值判断口径一致
+     */
+    const jumpUnreadCount = getJumpUnread(linkman);
 
     const messageList = Object.values(messages);
 

@@ -81,6 +81,29 @@ export function getSessionAnchorUnread(linkman?: Linkman | null): number {
 }
 
 /**
+ * 未读少于这个数就不提示跳转.
+ *
+ * 只积压了两三条时, 往上滚一下就看到了, 再弹一个提示条反而碍事 ——
+ * 它遮住输入框上方那块地方, 收益却接近于零.
+ * 攒够一屏装不下的量, "跳回去"才真的省事
+ */
+export const MinUnreadForJump = 8;
+
+/**
+ * 提示条上会显示的那个未读数.
+ *
+ * 判断"要不要显示"和"显示几"必须用同一个函数算 —— 各算各的迟早会出现
+ * "提示条说 9 条, 阈值却按别的数判断"这种自相矛盾
+ */
+export function getJumpUnread(linkman?: Linkman | null): number {
+    if (!linkman) {
+        return 0;
+    }
+    const pinned = getSessionAnchorUnread(linkman);
+    return pinned > 0 ? pinned : linkman.unreadSnapshot || 0;
+}
+
+/**
  * 聊天区底部要不要显示"回到上次阅读位置".
  *
  * 两种情况都算数:
@@ -90,6 +113,10 @@ export function getSessionAnchorUnread(linkman?: Linkman | null): number {
  */
 export function shouldShowJumpToLastRead(linkman?: Linkman | null): boolean {
     if (!linkman || linkman.hasGapAfter) {
+        return false;
+    }
+    // 未读太少不值得为它弹一个提示条
+    if (getJumpUnread(linkman) <= MinUnreadForJump) {
         return false;
     }
     const pinned =
