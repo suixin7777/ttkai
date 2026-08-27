@@ -113,6 +113,32 @@ type ScrollIntent = { linkmanId: string } & (
     | { type: 'keep'; messageId: string; offset: number }
 );
 
+/**
+ * 最新一条是不是"真的新来了一条", 而不是同一条消息换了身份.
+ *
+ * 自己发的消息会经历"乐观插入 -> 落库后换成真实 id"两步, 第二步不该再滚一次.
+ *
+ * 刻意不比较 createTime —— 试过, 是错的: 乐观消息的时间戳来自浏览器本地
+ * Date.now(), 而窗口里其它消息的时间戳来自服务端, 两个时钟根本不可比.
+ * 服务器时钟只要快哪怕几秒, "时间戳前进了"就不成立, 结果连第一次滚动
+ * 都被挡掉, 发完消息画面完全不动
+ *
+ * 换 id 这一步有个不依赖时钟的特征: 上一条是乐观 id (非 ObjectId 形态),
+ * 这一条是真实 ObjectId
+ */
+export function isNewMessageArrival(
+    prevNewestId: string | null,
+    newestId: string | null,
+): boolean {
+    if (!newestId || newestId === prevNewestId) {
+        return false;
+    }
+    const wasOptimistic = !!prevNewestId && !ObjectIdRegex.test(prevNewestId);
+    const isReplacingOptimistic =
+        wasOptimistic && ObjectIdRegex.test(newestId);
+    return !isReplacingOptimistic;
+}
+
 type Props = {
     /** ChatInput 的 ref, 用于点头像/回复时把文本插入输入框 */
     qwe: any;
@@ -180,8 +206,6 @@ function MessageList(props: Props) {
     const prevFocus = useRef(focus);
     /** 上一次渲染时窗口里最新一条消息的 id, 用来识别"刚刚新增了一条" */
     const prevNewestId = useRef<string | null>(null);
-    /** 上一次见过的最新消息时间戳, 用来区分"真的来了新消息"和"只是换了 id" */
-    const prevNewestCreateTime = useRef(0);
     /**
      * 本次进入会话内, 用户是否已经用过"回到上次阅读位置".
      *
@@ -527,37 +551,15 @@ function MessageList(props: Props) {
          *
          * 时间戳才是可靠依据: 换 key 时 createTime 不变, 真来了新消息才会前进
          */
-        const newestCreateTime = newestId
-            ? new Date(messages[newestId].createTime).getTime()
-            : 0;
-        /**
-         * 自己发的消息会经历"乐观插入 -> 落库后换成真实 id"两步.
-         *
-         * 光比时间戳挡不住第二步: 乐观消息用的是本地 Date.now(), 而服务端
-         * 落库的时间戳通常还要晚几十毫秒, 于是"时间戳前进了"照样成立 ——
-         * 结果同一条消息滚两次, 用户看到的就是发完之后画面又动了一下
-         *
-         * 换 id 这一步的特征很明确: 上一次的最新一条是乐观 id (不是 ObjectId 形态),
-         * 这一次变成了真实 ObjectId. 这种情况只是同一条消息换了身份, 不是新消息
-         */
-        const wasOptimistic =
-            !!prevNewestId.current &&
-            !ObjectIdRegex.test(prevNewestId.current);
-        const isReplacingOptimistic =
-            wasOptimistic && !!newestId && ObjectIdRegex.test(newestId);
-        const isNewestChanged =
-            !!newestId &&
-            newestId !== prevNewestId.current &&
-            newestCreateTime > prevNewestCreateTime.current &&
-            !isReplacingOptimistic;
+        const isNewestChanged = isNewMessageArrival(
+            prevNewestId.current,
+            newestId,
+        );
         const isNewSelfMessage =
             isNewestChanged &&
             !!messages[newestId as string].from &&
             messages[newestId as string].from._id === selfId;
         prevNewestId.current = newestId;
-        if (newestCreateTime > prevNewestCreateTime.current) {
-            prevNewestCreateTime.current = newestCreateTime;
-        }
 
         const intent = scrollIntent.current;
         scrollIntent.current = null;
