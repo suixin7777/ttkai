@@ -256,6 +256,25 @@ function MessageList(props: Props) {
     }
 
     /**
+     * 滚到底部, 并在下一帧再确认一次.
+     *
+     * 只滚一次不够: 滚动发生在 DOM 提交的那一刻, 而此时高度未必是最终高度.
+     * 引用别人发言渲染出来的原文块会多占一到两行, 排版有可能下一帧才落定,
+     * 于是滚动停在了旧高度对应的位置, 新长出来的内容留在视口下方
+     *
+     * 复核时要重新读一次 scrollHeight —— 不能沿用上一帧那个已经过期的值
+     */
+    function stickToBottom($div: HTMLDivElement) {
+        $div.scrollTop = $div.scrollHeight;
+        window.requestAnimationFrame(() => {
+            // 这一帧里用户可能已经自己滚开了, 那就不要再拽他
+            if (nearBottom.current && $list.current === $div) {
+                $div.scrollTop = $div.scrollHeight;
+            }
+        });
+    }
+
+    /**
      * 是否可以把"读到底部"如实上报
      *
      * 只有当上次阅读位置落在当前已加载窗口之内时, "滚动到底部"才真的等于
@@ -574,7 +593,7 @@ function MessageList(props: Props) {
          */
         if (isFocusChange) {
             nearBottom.current = true;
-            $div.scrollTop = $div.scrollHeight;
+            stickToBottom($div);
             return;
         }
 
@@ -618,7 +637,7 @@ function MessageList(props: Props) {
                 return;
             }
             if (intent.type === 'bottom') {
-                $div.scrollTop = $div.scrollHeight;
+                stickToBottom($div);
                 nearBottom.current = true;
                 return;
             }
@@ -626,7 +645,7 @@ function MessageList(props: Props) {
 
         if (isNewSelfMessage) {
             nearBottom.current = true;
-            $div.scrollTop = $div.scrollHeight;
+            stickToBottom($div);
             return;
         }
 
@@ -638,7 +657,7 @@ function MessageList(props: Props) {
          * 去决定这一轮要不要弹到底部
          */
         if (isNewestChanged && nearBottom.current) {
-            $div.scrollTop = $div.scrollHeight;
+            stickToBottom($div);
         }
     }, [messages, focus, selfId]);
 
@@ -675,6 +694,34 @@ function MessageList(props: Props) {
             window.removeEventListener('pagehide', flushOnHide);
         };
     }, [reportRead]);
+
+    /**
+     * 内容在"本该贴着底部"的状态下变高时, 重新贴回去.
+     *
+     * 滚动是在 DOM 提交那一刻做完的, 但那时高度未必是最终高度 ——
+     * 引用别人发言时会渲染出被引用的原文、分隔线, 里面还可能有表情图或图片,
+     * 图片要等加载完高度才定下来. 于是滚动停在了旧高度对应的位置,
+     * 新长出来的那一行被留在了视口下面, 看起来就是"卡在中间"
+     *
+     * load 事件不冒泡, 但在捕获阶段能收到, 所以挂在滚动容器上就能覆盖
+     * 里面所有图片. 只在 nearBottom 为真时才动 —— 正在翻历史的用户
+     * (nearBottom 为假) 不受任何影响
+     */
+    useEffect(() => {
+        const $div = $list.current;
+        if (!$div) {
+            return undefined;
+        }
+        function repinToBottom() {
+            if (nearBottom.current && $div) {
+                $div.scrollTop = $div.scrollHeight;
+            }
+        }
+        $div.addEventListener('load', repinToBottom, true);
+        return () => {
+            $div.removeEventListener('load', repinToBottom, true);
+        };
+    }, []);
 
     useEffect(
         () => () => {
