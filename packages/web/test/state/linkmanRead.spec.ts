@@ -6,6 +6,7 @@ import {
 import {
     shouldShowJumpToLastRead,
     getSessionAnchorUnread,
+    getJumpUnread,
 } from '../../src/state/linkmanRead';
 import reducer, { Linkman, State } from '../../src/state/reducer';
 import { ActionTypes } from '../../src/state/action';
@@ -129,6 +130,102 @@ describe('linkmanRead', () => {
             expect(
                 getDisplayUnread(pendingLinkman({ unread: 3 })),
             ).toBe(3);
+        });
+    });
+
+    /**
+     * 用户反馈: 不点"×"而是继续发言, 未读数会一直往上叠 ——
+     * 因为锚点还钉着, 而未读是"锚点之后有多少条", 自己刚发的也算了进去
+     */
+    describe('发言即视为读完', () => {
+        function focusedWithAnchor(): State {
+            const messages = buildMessages(30);
+            const keys = Object.keys(messages);
+            return {
+                focus: 'g1',
+                user: { _id: 'u1' },
+                linkmans: {
+                    g1: {
+                        _id: 'g1',
+                        unread: 0,
+                        unreadSnapshot: 12,
+                        messages,
+                        sessionAnchorId: keys[keys.length - 1 - 12],
+                        sessionAnchorCreateTime: 1000,
+                        sessionAnchorUnread: 12,
+                        lastReadMessageId: keys[0],
+                        lastReadCreateTime: 1000,
+                        oldestCreateTime: 1000,
+                        hasGapAfter: false,
+                    } as unknown as Linkman,
+                },
+            } as unknown as State;
+        }
+
+        it('自己发一条之后, 锚点和未读都清零, 提示条退场', () => {
+            const before = focusedWithAnchor();
+            expect(getJumpUnread(before.linkmans.g1)).toBe(12);
+
+            const after = reducer(before, {
+                type: ActionTypes.AddLinkmanMessage,
+                payload: {
+                    linkmanId: 'g1',
+                    message: {
+                        _id: 'ffffffffffffffffffffffff',
+                        createTime: new Date(999999),
+                        from: { _id: 'u1' },
+                    },
+                },
+            } as any);
+
+            const g1 = after.linkmans.g1;
+            expect(g1.sessionAnchorId).toBe(null);
+            expect(g1.unread).toBe(0);
+            expect(g1.unreadSnapshot).toBe(0);
+            expect(getJumpUnread(g1)).toBe(0);
+            expect(shouldShowJumpToLastRead(g1)).toBe(false);
+        });
+
+        it('别人发的消息不清零, 未读该涨还是要涨', () => {
+            const before = focusedWithAnchor();
+            const after = reducer(before, {
+                type: ActionTypes.AddLinkmanMessage,
+                payload: {
+                    linkmanId: 'g1',
+                    message: {
+                        _id: 'ffffffffffffffffffffffff',
+                        createTime: new Date(999999),
+                        from: { _id: 'someone-else' },
+                    },
+                },
+            } as any);
+            expect(after.linkmans.g1.sessionAnchorId).not.toBe(null);
+            expect(getJumpUnread(after.linkmans.g1)).toBe(13);
+        });
+
+        it('在别的会话里发言, 不影响当前会话的未读', () => {
+            const before = focusedWithAnchor();
+            before.linkmans.g2 = {
+                _id: 'g2',
+                unread: 0,
+                messages: {},
+                sessionAnchorId: null,
+            } as unknown as Linkman;
+
+            const after = reducer(before, {
+                type: ActionTypes.AddLinkmanMessage,
+                payload: {
+                    linkmanId: 'g2',
+                    message: {
+                        _id: 'ffffffffffffffffffffffff',
+                        createTime: new Date(999999),
+                        from: { _id: 'u1' },
+                    },
+                },
+            } as any);
+            // g1 没被碰
+            expect(after.linkmans.g1.sessionAnchorId).not.toBe(null);
+            expect(getJumpUnread(after.linkmans.g1)).toBe(12);
         });
     });
 

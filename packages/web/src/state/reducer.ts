@@ -1156,6 +1156,23 @@ function reducer(state: State = initialState, action: Action): State {
                          * enterLinkman 里的裁剪就是因为同样的原因才置 true 的
                          */
                         ...(trimmed ? { hasMoreBefore: true } : {}),
+                        /**
+                         * 在这个会话里发了言, 就等于把它读完了.
+                         *
+                         * 用户反馈: 不点"×"而是继续发言, 未读数会一直往上叠.
+                         * 因为会话锚点还钉在原处, 而未读是"锚点之后有多少条"——
+                         * 自己刚发的那些也被算了进去, 于是越说越多
+                         *
+                         * 能发言说明人就在这儿、也已经被滚到了底部, 没有什么"没读到"
+                         * 的东西了. 所以顺手把锚点和未读一起清掉, 提示条也就退场了
+                         */
+                        ...(isSelfMessage && state.focus === payload.linkmanId
+                            ? {
+                                ...EmptySessionAnchor,
+                                unread: 0,
+                                unreadSnapshot: 0,
+                            }
+                            : {}),
                     },
                 },
             };
