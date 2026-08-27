@@ -530,10 +530,26 @@ function MessageList(props: Props) {
         const newestCreateTime = newestId
             ? new Date(messages[newestId].createTime).getTime()
             : 0;
+        /**
+         * 自己发的消息会经历"乐观插入 -> 落库后换成真实 id"两步.
+         *
+         * 光比时间戳挡不住第二步: 乐观消息用的是本地 Date.now(), 而服务端
+         * 落库的时间戳通常还要晚几十毫秒, 于是"时间戳前进了"照样成立 ——
+         * 结果同一条消息滚两次, 用户看到的就是发完之后画面又动了一下
+         *
+         * 换 id 这一步的特征很明确: 上一次的最新一条是乐观 id (不是 ObjectId 形态),
+         * 这一次变成了真实 ObjectId. 这种情况只是同一条消息换了身份, 不是新消息
+         */
+        const wasOptimistic =
+            !!prevNewestId.current &&
+            !ObjectIdRegex.test(prevNewestId.current);
+        const isReplacingOptimistic =
+            wasOptimistic && !!newestId && ObjectIdRegex.test(newestId);
         const isNewestChanged =
             !!newestId &&
             newestId !== prevNewestId.current &&
-            newestCreateTime > prevNewestCreateTime.current;
+            newestCreateTime > prevNewestCreateTime.current &&
+            !isReplacingOptimistic;
         const isNewSelfMessage =
             isNewestChanged &&
             !!messages[newestId as string].from &&
